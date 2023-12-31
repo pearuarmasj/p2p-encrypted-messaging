@@ -21,7 +21,7 @@
 #define DEFAULT_PORT "27015"
 #define IP_ADDRESS "127.0.0.1" // Change this to your local IPv4 address on your machine and port forward it through your router if you want to connect to this server from another machine on the internet
 #define DEFAULT_BUFLEN 65536
-// This will be the program that the client will run, and connect to the host.
+// This will be the program that the host will run, and the client will connect to.
 
 using namespace std;
 using namespace CryptoPP;
