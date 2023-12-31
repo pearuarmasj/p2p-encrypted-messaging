@@ -219,6 +219,32 @@ void ReceiveSerializedSecByteBlocks(SOCKET& ConnectSocket, CryptoPP::SecByteBloc
     }
 }
 
+// Receive the new key and IV from the host
+void ReceiveNewKeyAndIV(SOCKET& ConnectSocket, CryptoPP::SecByteBlock& key2, CryptoPP::SecByteBlock& iv2) {
+    // Receive the new key and IV
+    char recvbuf[DEFAULT_BUFLEN];
+    int iResult = recv(ConnectSocket, recvbuf, DEFAULT_BUFLEN, 0);
+    if (iResult > 0) {
+        // Print the new key and IV to the console
+        cout << "Received new key and IV: " << recvbuf << endl;
+        // Deserialize the new key and IV
+        string serialized(recvbuf, iResult);
+        DeserializeSecByteBlocks(serialized, key2, iv2);
+    }
+    else if (iResult == 0) {
+        cout << "Connection closed." << endl;
+        closesocket(ConnectSocket);
+        WSACleanup();
+        exit(1);
+    }
+    else {
+        cout << "recv failed with error: " << WSAGetLastError() << endl;
+        closesocket(ConnectSocket);
+        WSACleanup();
+        exit(1);
+    }
+}
+
 
 int main() {
     // Initialize Winsock
@@ -260,7 +286,7 @@ int main() {
     while (keepCommunicating) {
         // Send a message to the host
         string plain;
-        cout << "\nEnter a message to send to the host: ";
+        cout << "Enter a message to send to the host: ";
         getline(cin, plain);
         string cipher;
         EncryptMessage(plain, cipher, key, iv);
@@ -272,13 +298,17 @@ int main() {
             return 1;
         }
 
-        // Receive a message from the host
+        // Receive the new key and IV from the host before receiving the message
+        CryptoPP::SecByteBlock key2(AES::DEFAULT_KEYLENGTH);
+        CryptoPP::SecByteBlock iv2(AES::BLOCKSIZE);
+        ReceiveNewKeyAndIV(ConnectSocket, key2, iv2);
+        // Receive the message
         char recvbuf[DEFAULT_BUFLEN];
         iResult = recv(ConnectSocket, recvbuf, DEFAULT_BUFLEN, 0);
         if (iResult > 0) {
             string cipher(recvbuf, iResult);
             string plain;
-            DecryptMessage(cipher, plain, key, iv);
+            DecryptMessage(cipher, plain, key2, iv2);
             cout << "Host: " << plain << endl;
         }
         else if (iResult == 0) {

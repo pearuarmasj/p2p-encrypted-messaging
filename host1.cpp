@@ -179,6 +179,39 @@ void SendSerializedBlocks(SOCKET& ClientSocket, const string& serialized) {
     int iSendResult = send(ClientSocket, serialized.c_str(), serialized.size(), 0);
 }
 
+// Discard the old key and IV and generate new ones, then send them to the client
+void RegenerateKeyAndIV(SOCKET& ClientSocket, CryptoPP::SecByteBlock& key2, CryptoPP::SecByteBlock& iv2) {
+    // Generate the key and IV
+    GenerateAESKey(key2);
+    GenerateAESIV(iv2);
+
+    // Print the key and IV to the console
+    cout << "Key: ";
+    StringSource(key2.data(), key2.size(), true,
+        new HexEncoder(
+            new FileSink(cout)
+        )
+    );
+    cout << endl;
+    cout << "IV: ";
+    StringSource(iv2.data(), iv2.size(), true,
+        new HexEncoder(
+            new FileSink(cout)
+        )
+    );
+    cout << endl;
+
+    // Serialize the blocks
+    string serialized;
+    SerializeSecByteBlocks(key2, iv2, serialized);
+
+    // Print the serialized blocks to the console
+    cout << "Serialized key and IV: " << serialized << endl;
+
+    // Send the SERIALIZED blocks to the client
+    SendSerializedBlocks(ClientSocket, serialized);
+}
+
 int main() {
     // Initialize Winsock
     WSADATA wsaData;
@@ -280,7 +313,21 @@ int main() {
             string cipher = recvbuf;
             string plain;
             DecryptMessage(cipher, plain, key, iv);
-            cout << "Client: " << plain << endl;
+            // Print the key and IV to the console
+            cout << "Key: ";
+            StringSource(key, AES::DEFAULT_KEYLENGTH, true,
+                new HexEncoder(
+                    new FileSink(cout)
+                )
+            );
+            cout << "\n";
+            cout << "IV: ";
+            StringSource(iv, AES::BLOCKSIZE, true,
+                new HexEncoder(
+                    new FileSink(cout)
+                )
+            );
+            cout << "\nClient: " << plain << endl;
         } else if (iResult == 0) {
             cout << "Connection closing..." << endl;
             keepCommunicating = false;
@@ -291,12 +338,15 @@ int main() {
             return 1;
         }
 
-        // Send a message to the client
+        // Generate a new key and IV and send them to the client before the message
+        CryptoPP::SecByteBlock key2(AES::DEFAULT_KEYLENGTH);
+        CryptoPP::SecByteBlock iv2(AES::BLOCKSIZE);
+        RegenerateKeyAndIV(ClientSocket, key2, iv2);
         string plain;
         cout << "Enter a message to send to the client: ";
         getline(cin, plain);
         string cipher;
-        EncryptMessage(plain, cipher, key, iv);
+        EncryptMessage(plain, cipher, key2, iv2);
         iResult = send(ClientSocket, cipher.c_str(), cipher.length(), 0);
         if (iResult == SOCKET_ERROR) {
             cout << "send failed with error: " << WSAGetLastError() << endl;
