@@ -12,6 +12,9 @@
 #include <filters.h>       // For CryptoPP filters
 #include <modes.h>         // For CryptoPP modes
 #include <aes.h>           // For AES cryptography
+#include <secblock.h>      // For CryptoPP SecByteBlock
+#include <hex.h>           // For CryptoPP HexEncoder
+#include <files.h>         // For CryptoPP FileSink and FileSource
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cryptlib.lib")
@@ -96,13 +99,13 @@ void DecryptMessage(const string& cipher, string& plain, const CryptoPP::byte ke
     }
 }
 
-string recvMessage(SOCKET socket, const CryptoPP::SecByteBlock &key, const CryptoPP::SecByteBlock &iv) {
+string recvMessage(SOCKET ConnectSocket, const CryptoPP::SecByteBlock &key, const CryptoPP::SecByteBlock &iv) {
     char recvbuf[DEFAULT_BUFLEN];
     string message;
     int iResult;
 
     do {
-        iResult = recv(socket, recvbuf, DEFAULT_BUFLEN, 0);
+        iResult = recv(ConnectSocket, recvbuf, DEFAULT_BUFLEN, 0);
         if (iResult > 0) {
             message.append(recvbuf, iResult);
         } else if (iResult == 0) {
@@ -118,6 +121,104 @@ string recvMessage(SOCKET socket, const CryptoPP::SecByteBlock &key, const Crypt
     DecryptMessage(message, plain, key, iv);
     return plain;
 }
+
+// Deserialize the SecByteBlocks from the host using hex decoding, and print the key and IV to the console
+void DeserializeSecByteBlocks(const string& serialized, CryptoPP::SecByteBlock& key, CryptoPP::SecByteBlock& iv) {
+    // Deserialize the key
+    string serializedKey = serialized.substr(0, AES::DEFAULT_KEYLENGTH * 2);
+    StringSource ss(serializedKey, true,
+        new HexDecoder(
+            new ArraySink((CryptoPP::byte*)key, AES::DEFAULT_KEYLENGTH)
+        )
+    );
+
+    // Deserialize the IV
+    string serializedIV = serialized.substr(AES::DEFAULT_KEYLENGTH * 2, AES::BLOCKSIZE * 2);
+    StringSource ss2(serializedIV, true,
+        new HexDecoder(
+            new ArraySink((CryptoPP::byte*)iv, AES::BLOCKSIZE)
+        )
+    );
+
+    // Print the key and IV to the console
+    cout << "Key: ";
+    StringSource ss3(key.data(), key.size(), true,
+        new HexEncoder(
+            new FileSink(cout)
+        )
+    );
+    cout << endl;
+    cout << "IV: ";
+    StringSource ss4(iv.data(), iv.size(), true,
+        new HexEncoder(
+            new FileSink(cout)
+        )
+    );
+    cout << endl;
+}
+
+// Serialization of the key and IV blocks for sending over the network, using hex encoding
+void SerializeSecByteBlocks(const CryptoPP::SecByteBlock& key, const CryptoPP::SecByteBlock& iv, string& serialized) {
+    // Serialize the key
+    string serializedKey;
+    StringSource ss(key.data(), key.size(), true,
+        new HexEncoder(
+            new StringSink(serializedKey)
+        )
+    );
+
+    // Serialize the IV
+    string serializedIV;
+    StringSource ss2(iv.data(), iv.size(), true,
+        new HexEncoder(
+            new StringSink(serializedIV)
+        )
+    );
+
+    // Concatenate the key and IV
+    serialized = serializedKey + serializedIV;
+}
+
+// Receive the HEX serialized blocks from the host
+void ReceiveSerializedSecByteBlocks(SOCKET& ConnectSocket, CryptoPP::SecByteBlock& key, CryptoPP::SecByteBlock& iv) {
+    // Receive the serialized key and IV
+    char recvbuf[DEFAULT_BUFLEN];
+    int iResult = recv(ConnectSocket, recvbuf, DEFAULT_BUFLEN, 0);
+    // Print the serialized blocks to the console
+    if (iResult > 0) {
+        cout << "Received serialized key and IV: " << recvbuf << endl;
+    }
+    else if (iResult == 0) {
+        cout << "Connection closed." << endl;
+        closesocket(ConnectSocket);
+        WSACleanup();
+        exit(1);
+    }
+    else {
+        cout << "recv failed with error: " << WSAGetLastError() << endl;
+        closesocket(ConnectSocket);
+        WSACleanup();
+        exit(1);
+    }
+    if (iResult > 0) {
+        // Deserialize the key and IV
+        string serialized(recvbuf, iResult);
+        DeserializeSecByteBlocks(serialized, key, iv);
+    }
+    else if (iResult == 0) {
+        cout << "Connection closed." << endl;
+        closesocket(ConnectSocket);
+        WSACleanup();
+        exit(1);
+    }
+    else {
+        cout << "recv failed with error: " << WSAGetLastError() << endl;
+        closesocket(ConnectSocket);
+        WSACleanup();
+        exit(1);
+    }
+}
+
 
 int main() {
     // Initialize Winsock
@@ -149,21 +250,10 @@ int main() {
         return 1;
     }
 
-    // Receive the key and IV from the host
-    CryptoPP::byte key[AES::DEFAULT_KEYLENGTH];
-    CryptoPP::byte iv[AES::BLOCKSIZE];
-    ReceiveKeyAndIV(ConnectSocket, key, iv);
-
-    // Print the key and IV
-    cout << "Key: ";
-    for (int i = 0; i < AES::DEFAULT_KEYLENGTH; i++) {
-        cout << hex << (int)key[i];
-    }
-    cout << endl;
-    cout << "IV: ";
-    for (int i = 0; i < AES::BLOCKSIZE; i++) {
-        cout << hex << (int)iv[i];
-    }
+    // Receive the serialized key and IV blocks from the host
+    CryptoPP::SecByteBlock key(AES::DEFAULT_KEYLENGTH);
+    CryptoPP::SecByteBlock iv(AES::BLOCKSIZE);
+    ReceiveSerializedSecByteBlocks(ConnectSocket, key, iv);
 
     // Establish an encrypted communication loop with the host
     bool keepCommunicating = true;
@@ -186,16 +276,6 @@ int main() {
         char recvbuf[DEFAULT_BUFLEN];
         iResult = recv(ConnectSocket, recvbuf, DEFAULT_BUFLEN, 0);
         if (iResult > 0) {
-            cout << "Bytes received: " << iResult << endl;
-            cout << "Key: "; // Print the key again
-            for (int i = 0; i < AES::DEFAULT_KEYLENGTH; i++) {
-                cout << hex << (int)key[i];
-            }
-            cout << "\nIV: "; // Print the IV again
-            for (int i = 0; i < AES::BLOCKSIZE; i++) {
-                cout << hex << (int)iv[i];
-            }
-            cout << endl;
             string cipher(recvbuf, iResult);
             string plain;
             DecryptMessage(cipher, plain, key, iv);
