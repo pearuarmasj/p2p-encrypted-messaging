@@ -19,7 +19,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cryptlib.lib")
 #define DEFAULT_PORT "27015"
-#define IP_ADDRESS "127.0.0.1"
+#define IP_ADDRESS "127.0.0.1" // Change this to your local IPv4 address on your machine and port forward it through your router if you want to connect to this server from another machine on the internet
 #define DEFAULT_BUFLEN 65536
 // This will be the program that the client will run, and connect to the host.
 

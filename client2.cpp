@@ -19,7 +19,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cryptlib.lib")
 #define DEFAULT_PORT "27015"
-#define IP_ADDRESS "127.0.0.1"
+#define IP_ADDRESS "127.0.0.1" // Change this to the public IP address of the network the host application is listening on.
 #define DEFAULT_BUFLEN 65536
 // This will be the program that the client will run, and connect to the host.
 
