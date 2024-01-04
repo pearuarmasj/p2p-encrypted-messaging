@@ -21,7 +21,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cryptlib.lib")
 #define DEFAULT_PORT "27015"
-#define IP_ADDRESS "127.0.0.1"
+#define IP_ADDRESS "192.168.1.128"
 #define DEFAULT_BUFLEN 262144
 #define RSA_KEYLENGTH 3072
 #define AES_DEFAULT_KEYLENGTH 32
@@ -245,12 +245,15 @@ int main() {
     }
     cout << "Bytes sent: " << iResult << endl;
 
+    Sleep(500);
+
     // Receive and decrypt AES key and IV from client
     char recvbuf[DEFAULT_BUFLEN];
     int recvbuflen = DEFAULT_BUFLEN;
     iResult = recv(host.ClientSocket, recvbuf, recvbuflen, 0);
     if (iResult > 0) {
         string encodedKey(recvbuf);
+        Sleep(500);
         iResult = recv(host.ClientSocket, recvbuf, recvbuflen, 0);
         if (iResult > 0) {
             string encodedIV(recvbuf);

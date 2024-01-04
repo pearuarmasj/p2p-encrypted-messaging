@@ -154,6 +154,8 @@ int main() {
     SecByteBlock publicKey;
     ReceiveRSAPublicKey(client.ConnectSocket, publicKey);
 
+    Sleep(500);
+
     // Convert RSA public key to RSA public key object.
     RSA::PublicKey rsaPublicKey;
     ConvertRSAPublicKeyToRSAPublicKeyObject(publicKey, rsaPublicKey);
@@ -180,6 +182,8 @@ int main() {
     cout << "Encrypted and encoded AES key: " << encodedKey << endl;
     cout << "Encrypted and encoded AES IV: " << encodedIV << endl;
 
+    Sleep(500);
+
     // Send the encrypted and encoded AES key and IV to the host.
     int iResult;
     iResult = send(client.ConnectSocket, encodedKey.c_str(), encodedKey.size(), 0);
@@ -190,6 +194,9 @@ int main() {
         exit(1);
     }
     cout << "Bytes sent: " << iResult << endl;
+
+    Sleep(500);
+
     iResult = send(client.ConnectSocket, encodedIV.c_str(), encodedIV.size(), 0);
     if (iResult == SOCKET_ERROR) {
         cout << "send failed: " << WSAGetLastError() << endl;
