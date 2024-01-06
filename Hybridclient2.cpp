@@ -83,16 +83,6 @@ void GenerateAESKeyAndIV(CryptoPP::byte key[], CryptoPP::byte iv[]) {
     rng.GenerateBlock(iv, AES_IV_SIZE);
 }
 
-// This function will make copies of the generates AES key and IV.
-void CopyAESKeyAndIV(CryptoPP::byte key[], CryptoPP::byte iv[], CryptoPP::byte keyCopy[], CryptoPP::byte ivCopy[]) {
-    for (int i = 0; i < AES_DEFAULT_KEYLENGTH; i++) {
-        keyCopy[i] = key[i];
-    }
-    for (int i = 0; i < AES_IV_SIZE; i++) {
-        ivCopy[i] = iv[i];
-    }
-}
-
 // This function will receive the RSA public key SecByteBlock from the host, and decode it from base64.
 void ReceiveRSAPublicKey(SOCKET ConnectSocket, SecByteBlock& publicKey) {
     int iResult;
@@ -126,7 +116,7 @@ void ConvertRSAPublicKeyToRSAPublicKeyObject(SecByteBlock& publicKey, RSA::Publi
     cout << "RSA public key converted to RSA public key object." << endl;
 }
 
-// This function will encrypt and encode the original AES key and IV using the RSA public key.
+// This function will encrypt and encode the AES key and IV using the RSA public key.
 void EncryptAndEncodeAESKeyAndIV(RSA::PublicKey& rsaPublicKey, CryptoPP::byte key[], CryptoPP::byte iv[], string& encodedKey, string& encodedIV) {
     cout << "Encrypting AES key and IV using RSA public key..." << endl;
     string encryptedKey, encryptedIV;
@@ -141,7 +131,7 @@ void EncryptAndEncodeAESKeyAndIV(RSA::PublicKey& rsaPublicKey, CryptoPP::byte ke
     cout << "Encrypted AES key and IV encoded using base64." << endl;
 }
 
-// This function will be used to encrypt and encode messages using the copies of the AES key and IV.
+// This function will be used to encrypt and encode messages using the AES key and IV.
 void EncryptAndEncodeMessage(CryptoPP::byte key[], CryptoPP::byte iv[], string& message, string& encodedMessage) {
     string encryptedMessage;
     CBC_Mode<AES>::Encryption e;
@@ -153,7 +143,7 @@ void EncryptAndEncodeMessage(CryptoPP::byte key[], CryptoPP::byte iv[], string& 
     cout << "Encrypted message: " << encodedMessage << endl;
 }
 
-// This function will be used to decrypt and decode messages using the copies of the AES key and IV.
+// This function will be used to decrypt and decode messages using the AES key and IV.
 void DecryptAndDecodeMessage(CryptoPP::byte key[], CryptoPP::byte iv[], string& encodedMessage, string& decryptedMessage) {
     string decodedMessage;
     StringSource(encodedMessage, true, new Base64Decoder(new StringSink(decodedMessage)));
@@ -164,6 +154,8 @@ void DecryptAndDecodeMessage(CryptoPP::byte key[], CryptoPP::byte iv[], string& 
 
     cout << "Decrypted message: " << decryptedMessage << endl;
 }
+
+// This function will discard old keys and generate new ones after every message
 
 int main() {
     Client client;
@@ -250,8 +242,6 @@ int main() {
         }
         cout << "Bytes sent: " << iResult << endl;
 
-        Sleep(500);
-
         // Receive encoded message from host.
         char recvbuf[DEFAULT_BUFLEN];
         int recvbuflen = DEFAULT_BUFLEN;
@@ -270,6 +260,8 @@ int main() {
             cout << "recv failed: " << WSAGetLastError() << endl;
             keepCommunicating = false;
         }
+
+        memset(recvbuf, 0, recvbuflen);
     }
     // Close the socket
     closesocket(client.ConnectSocket);
