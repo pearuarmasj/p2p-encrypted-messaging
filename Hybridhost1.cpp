@@ -250,8 +250,6 @@ void EncryptAndEncodeMessage(string& message, string& encodedMessage, string dec
     cout << "Encoded message: " << encodedMessage << "\n";
 }
 
-// This function will discard old keys and generate new ones after every message
-
 int main() {
     Host host;
 
@@ -330,6 +328,32 @@ int main() {
         cout << "Bytes sent: " << iResult << endl;
 
         memset(recvbuf, 0, recvbuflen);
+
+        Sleep(500);
+
+        // Generate and send new RSA Public Key to client
+        RSA::PrivateKey newPrivateKey;
+        RSA::PublicKey newPublicKey;
+        GenerateRSAKeyPair(newPrivateKey, newPublicKey);
+        string newEncodedPrivateKey;
+        string newEncodedPublicKey;
+        SerializeAndEncodeToBase64(newPrivateKey, newPublicKey, newEncodedPrivateKey, newEncodedPublicKey);
+        cout << "New encoded public key: " << newEncodedPublicKey << endl;
+        iResult = send(host.ClientSocket, newEncodedPublicKey.c_str(), newEncodedPublicKey.size(), 0);
+        if (iResult == SOCKET_ERROR) {
+            cout << "send failed with error: " << WSAGetLastError() << endl;
+            closesocket(host.ClientSocket);
+            WSACleanup();
+            exit(1);
+        }
+        cout << "Bytes sent: " << iResult << endl;
+
+        Sleep(500);
+
+        // Receive and decrypt new AES key and IV from client
+        string newEncryptedKey;
+        string newEncryptedIV;
+        ReceiveAndDecryptAESKeyAndIV(host.ClientSocket, newEncryptedKey, newEncryptedIV, newPrivateKey);
 
     }
 

@@ -155,8 +155,6 @@ void DecryptAndDecodeMessage(CryptoPP::byte key[], CryptoPP::byte iv[], string& 
     cout << "Decrypted message: " << decryptedMessage << endl;
 }
 
-// This function will discard old keys and generate new ones after every message
-
 int main() {
     Client client;
 
@@ -262,6 +260,70 @@ int main() {
         }
 
         memset(recvbuf, 0, recvbuflen);
+
+        Sleep(500);
+
+        // Receive new RSA public key from host.
+        SecByteBlock newPublicKey;
+        ReceiveRSAPublicKey(client.ConnectSocket, newPublicKey);
+
+        Sleep(500);
+
+        // Convert new RSA public key to RSA public key object.
+        RSA::PublicKey newRSAPublicKey;
+        ConvertRSAPublicKeyToRSAPublicKeyObject(newPublicKey, newRSAPublicKey);
+
+        // Print the new RSA public key in string sink.
+        string newPublicKeyString;
+        StringSink ss(newPublicKeyString);
+        newRSAPublicKey.Save(ss);
+        cout << "New RSA public key: " << newPublicKeyString << endl;
+
+        // Generate new AES key and IV.
+        CryptoPP::byte newKey[AES_DEFAULT_KEYLENGTH];
+        CryptoPP::byte newIV[AES_IV_SIZE];
+        GenerateAESKeyAndIV(newKey, newIV);
+
+        // Print the generated new AES key and IV in string sink.
+        string newKeyString, newIVString;
+        StringSink ss1(newKeyString);
+        StringSink ss2(newIVString);
+        ss1.Put(newKey, AES_DEFAULT_KEYLENGTH);
+        ss2.Put(newIV, AES_IV_SIZE);
+        cout << "Generated new AES key: " << newKeyString << endl;
+        cout << "Generated new AES IV: " << newIVString << endl;
+
+        // Encrypt and encode new AES key and IV using new RSA public key.
+        string newEncodedKey, newEncodedIV;
+        EncryptAndEncodeAESKeyAndIV(newRSAPublicKey, newKey, newIV, newEncodedKey, newEncodedIV);
+
+        // Print the encrypted and encoded new AES key and IV.
+        cout << "Encrypted and encoded new AES key: " << newEncodedKey << endl;
+        cout << "Encrypted and encoded new AES IV: " << newEncodedIV << endl;
+
+        Sleep(500);
+
+        // Send the encrypted and encoded new AES key and IV to the host.
+        int iResult;
+        iResult = send(client.ConnectSocket, newEncodedKey.c_str(), newEncodedKey.size(), 0);
+        if (iResult == SOCKET_ERROR) {
+            cout << "send failed: " << WSAGetLastError() << endl;
+            closesocket(client.ConnectSocket);
+            WSACleanup();
+            exit(1);
+        }
+        cout << "Bytes sent: " << iResult << endl;
+
+        Sleep(500);
+
+        iResult = send(client.ConnectSocket, newEncodedIV.c_str(), newEncodedIV.size(), 0);
+        if (iResult == SOCKET_ERROR) {
+            cout << "send failed: " << WSAGetLastError() << endl;
+            closesocket(client.ConnectSocket);
+            WSACleanup();
+            exit(1);
+        }
+        cout << "Bytes sent: " << iResult << endl;
     }
     // Close the socket
     closesocket(client.ConnectSocket);
