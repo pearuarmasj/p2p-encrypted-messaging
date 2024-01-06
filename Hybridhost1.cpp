@@ -250,6 +250,8 @@ void EncryptAndEncodeMessage(string& message, string& encodedMessage, string dec
     cout << "Encoded message: " << encodedMessage << "\n";
 }
 
+// This function will discard old keys and generate new ones after every message
+
 int main() {
     Host host;
 
@@ -312,8 +314,6 @@ int main() {
             exit(1);
         }
 
-        Sleep(500);
-
         // Send encoded message to client
         string message;
         cout << "Enter a message to send to the client: ";
@@ -328,6 +328,8 @@ int main() {
             exit(1);
         }
         cout << "Bytes sent: " << iResult << endl;
+
+        memset(recvbuf, 0, recvbuflen);
 
     }
 
