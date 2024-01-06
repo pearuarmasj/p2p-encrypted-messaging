@@ -33,12 +33,6 @@ using namespace CryptoPP;
 
 // This will be the program that the client will run and connect to the host.
 
-// We will use CBC mode and Base64 for the encoding and encryption of messages and keys.
-// We will also use base64 for serialization / deserialization of keys.
-// We will make sure that we are exact with our data handling, manipulation, and transmission.
-// We will also make sure that the functions / logic of both the client and host are the same and perfectly complementary.
-// Our code will be as clean, short, but as secure as possible.
-
 // This class will be used to set up the connection socket to the host.
 
 class Client
@@ -147,6 +141,30 @@ void EncryptAndEncodeAESKeyAndIV(RSA::PublicKey& rsaPublicKey, CryptoPP::byte ke
     cout << "Encrypted AES key and IV encoded using base64." << endl;
 }
 
+// This function will be used to encrypt and encode messages using the copies of the AES key and IV.
+void EncryptAndEncodeMessage(CryptoPP::byte key[], CryptoPP::byte iv[], string& message, string& encodedMessage) {
+    string encryptedMessage;
+    CBC_Mode<AES>::Encryption e;
+    e.SetKeyWithIV(key, AES_DEFAULT_KEYLENGTH, iv);
+    StringSource(message, true, new StreamTransformationFilter(e, new StringSink(encryptedMessage)));
+
+    StringSource(encryptedMessage, true, new Base64Encoder(new StringSink(encodedMessage)));
+
+    cout << "Encrypted message: " << encodedMessage << endl;
+}
+
+// This function will be used to decrypt and decode messages using the copies of the AES key and IV.
+void DecryptAndDecodeMessage(CryptoPP::byte key[], CryptoPP::byte iv[], string& encodedMessage, string& decryptedMessage) {
+    string decodedMessage;
+    StringSource(encodedMessage, true, new Base64Decoder(new StringSink(decodedMessage)));
+
+    CBC_Mode<AES>::Decryption d;
+    d.SetKeyWithIV(key, AES_DEFAULT_KEYLENGTH, iv);
+    StringSource(decodedMessage, true, new StreamTransformationFilter(d, new StringSink(decryptedMessage)));
+
+    cout << "Decrypted message: " << decryptedMessage << endl;
+}
+
 int main() {
     Client client;
 
@@ -159,6 +177,12 @@ int main() {
     // Convert RSA public key to RSA public key object.
     RSA::PublicKey rsaPublicKey;
     ConvertRSAPublicKeyToRSAPublicKeyObject(publicKey, rsaPublicKey);
+
+    // Print the RSA public key in string sink.
+    string publicKeyString;
+    StringSink ss(publicKeyString);
+    rsaPublicKey.Save(ss);
+    cout << "RSA public key: " << publicKeyString << endl;
 
     // Generate AES key and IV.
     CryptoPP::byte key[AES_DEFAULT_KEYLENGTH];
@@ -205,4 +229,51 @@ int main() {
         exit(1);
     }
     cout << "Bytes sent: " << iResult << endl;
+
+    Sleep(500);
+
+    // Establish an encrypted communication loop with the host.
+    bool keepCommunicating = true;
+    while (keepCommunicating) {
+        // Send encoded message to host.
+        string message;
+        cout << "Enter message to send to host: ";
+        getline(cin, message);
+        string encodedMessage;
+        EncryptAndEncodeMessage(key, iv, message, encodedMessage);
+        iResult = send(client.ConnectSocket, encodedMessage.c_str(), encodedMessage.size(), 0);
+        if (iResult == SOCKET_ERROR) {
+            cout << "send failed: " << WSAGetLastError() << endl;
+            closesocket(client.ConnectSocket);
+            WSACleanup();
+            exit(1);
+        }
+        cout << "Bytes sent: " << iResult << endl;
+
+        Sleep(500);
+
+        // Receive encoded message from host.
+        char recvbuf[DEFAULT_BUFLEN];
+        int recvbuflen = DEFAULT_BUFLEN;
+        iResult = recv(client.ConnectSocket, recvbuf, DEFAULT_BUFLEN, 0);
+        if (iResult > 0) {
+            string encodedMessage = recvbuf;
+            string decryptedMessage;
+            cout << "Received encrypted message from host: " << encodedMessage << endl;
+            DecryptAndDecodeMessage(key, iv, encodedMessage, decryptedMessage);
+        }
+        else if (iResult == 0) {
+            cout << "Connection closed." << endl;
+            keepCommunicating = false;
+        }
+        else {
+            cout << "recv failed: " << WSAGetLastError() << endl;
+            keepCommunicating = false;
+        }
+    }
+    // Close the socket
+    closesocket(client.ConnectSocket);
+    WSACleanup();
+
+    return 0;
 }

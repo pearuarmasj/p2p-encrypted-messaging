@@ -21,7 +21,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cryptlib.lib")
 #define DEFAULT_PORT "27015"
-#define IP_ADDRESS "192.168.1.128"
+#define IP_ADDRESS "127.0.0.1"
 #define DEFAULT_BUFLEN 262144
 #define RSA_KEYLENGTH 3072
 #define AES_DEFAULT_KEYLENGTH 32
@@ -32,12 +32,6 @@ using namespace std;
 using namespace CryptoPP;
 
 // This will be the program that the host will run and wait for the client to connect.
-
-// We will use CBC mode and Base64 for the encoding and encryption of messages and keys.
-// We will also use base64 for serialization / deserialization of keys.
-// We will make sure that we are exact with our data handling, manipulation, and transmission.
-// We will also make sure that the functions / logic of both the client and host are the same and perfectly complementary.
-// Our code will be as clean, short, but as secure as possible.
 
 // This class will set up the host's listening socket and accept a connection from the client.
 
@@ -113,6 +107,12 @@ void GenerateRSAKeyPair(RSA::PrivateKey& privateKey, RSA::PublicKey& publicKey)
     params.GenerateRandomWithKeySize(rng, RSA_KEYLENGTH);
     privateKey = RSA::PrivateKey(params);
     publicKey = RSA::PublicKey(params);
+
+    // Print public key in string sink.
+    string publicKeyString;
+    StringSink* pSink = new StringSink(publicKeyString);
+    publicKey.Save(*pSink);
+    cout << "Public key: " << publicKeyString << endl;
 }
 
 // Function to serialize and encode RSA keys to Base64
@@ -147,75 +147,107 @@ void SerializeAndEncodeToBase64(const RSA::PrivateKey& privateKey, const RSA::Pu
     encoder.MessageEnd();
 }
 
-// This function will receive the encrypted AES key and IV strings from the client, then decrypt them using the RSA private key, then decode them from Base64.
-void ReceiveAndDecryptAESKeyAndIV(const RSA::PrivateKey& privateKey, string encodedKey, string encodedIV) {
-    // Decode from Base64
-    string decodedKey, decodedIV;
-    StringSource(encodedKey, true, new Base64Decoder(new StringSink(decodedKey)));
-    StringSource(encodedIV, true, new Base64Decoder(new StringSink(decodedIV)));
-
-    // Decrypt using RSA private key
-    RSAES_OAEP_SHA_Decryptor d(privateKey);
-    AutoSeededRandomPool rng;
-    string decryptedKey, decryptedIV;
-    StringSource(decodedKey, true, new PK_DecryptorFilter(rng, d, new StringSink(decryptedKey)));
-    StringSource(decodedIV, true, new PK_DecryptorFilter(rng, d, new StringSink(decryptedIV)));
-
-    // Print decrypted AES key and IV
-    cout << "Decrypted AES key: " << decryptedKey << "\n";
-    cout << "Decrypted IV: " << decryptedIV << "\n";
-}
-
-// This function will use the decrypted AES key and IV to decrypt the message from the client.
-void DecryptMessage(const SecByteBlock& keyBlock, const SecByteBlock& ivBlock, SOCKET& ClientSocket) {
-    // Receive encrypted message from client
-    int iResult;
+// This function will recv the encrypted AES key and IV from the client, then decrypt them using the RSA private key, then decode them from Base64.
+void ReceiveAndDecryptAESKeyAndIV(SOCKET ClientSocket, string& encryptedKey, string& encryptedIV, const RSA::PrivateKey& privateKey) {
+    // Receive encrypted AES key from client
     char recvbuf[DEFAULT_BUFLEN];
-    int recvbuflen = DEFAULT_BUFLEN;
-    iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
+    int iResult = recv(ClientSocket, recvbuf, DEFAULT_BUFLEN, 0);
     if (iResult > 0) {
-        // Decode message from Base64
-        string encodedMessage(recvbuf);
-        StringSource(encodedMessage, true, new Base64Decoder(new ArraySink((CryptoPP::byte*)recvbuf, recvbuflen)));
-
-        // Decrypt message using AES key and IV
-        string decryptedMessage;
-        CBC_Mode<AES>::Decryption d;
-        d.SetKeyWithIV(keyBlock, keyBlock.size(), ivBlock);
-        StringSource((CryptoPP::byte*)recvbuf, recvbuflen, true, new StreamTransformationFilter(d, new StringSink(decryptedMessage)));
-
-        // Print decrypted message
-        cout << "Decrypted message from client: " << decryptedMessage << "\n";
+        cout << "Bytes received: " << iResult << endl;
     }
-    else if (iResult == 0)
+    else if (iResult == 0) {
         cout << "Connection closed\n";
-    else
-        cout << "recv failed with error: " << WSAGetLastError() << "\n";
-}
-
-// This function will encrypt messages using the AES key and IV.
-void EncryptMessage(const SecByteBlock& keyBlock, const SecByteBlock& ivBlock, SOCKET& ClientSocket) {
-    // Encrypt message using AES key and IV
-    string message = "Hello from host!";
-    string encryptedMessage;
-    CBC_Mode<AES>::Encryption e;
-    e.SetKeyWithIV(keyBlock, keyBlock.size(), ivBlock);
-    StringSource(message, true, new StreamTransformationFilter(e, new StringSink(encryptedMessage)));
-
-    // Encode message to Base64
-    string encodedMessage;
-    StringSource(encryptedMessage, true, new Base64Encoder(new StringSink(encodedMessage)));
-
-    // Send encoded message to client
-    int iResult;
-    iResult = send(ClientSocket, encodedMessage.c_str(), encodedMessage.size(), 0);
-    if (iResult == SOCKET_ERROR) {
-        cout << "send failed with error: " << WSAGetLastError() << "\n";
         closesocket(ClientSocket);
         WSACleanup();
         exit(1);
     }
-    cout << "Sent encrypted message to client: " << encodedMessage << "\n";
+    else {
+        cout << "recv failed with error: " << WSAGetLastError() << endl;
+        closesocket(ClientSocket);
+        WSACleanup();
+        exit(1);
+    }
+
+    Sleep(500);
+
+    // Decode from Base64
+    string decodedKey;
+    StringSource(recvbuf, true, new Base64Decoder(new StringSink(decodedKey)));
+
+    // Decrypt using RSA private key
+    string decryptedKey;
+    RSAES_OAEP_SHA_Decryptor d(privateKey);
+    AutoSeededRandomPool rng;
+    StringSource(decodedKey, true, new PK_DecryptorFilter(rng, d, new StringSink(decryptedKey)));
+
+    // Print decrypted AES key
+    cout << "Decrypted AES key: " << decryptedKey << "\n";
+
+    // Receive encrypted AES IV from client
+    Sleep(500);
+    iResult = recv(ClientSocket, recvbuf, DEFAULT_BUFLEN, 0);
+    if (iResult > 0) {
+        cout << "Bytes received: " << iResult << endl;
+    }
+    else if (iResult == 0) {
+        cout << "Connection closed\n";
+        closesocket(ClientSocket);
+        WSACleanup();
+        exit(1);
+    }
+    else {
+        cout << "recv failed with error: " << WSAGetLastError() << endl;
+        closesocket(ClientSocket);
+        WSACleanup();
+        exit(1);
+    }
+
+    Sleep(500);
+
+    // Decode from Base64
+    string decodedIV;
+    StringSource(recvbuf, true, new Base64Decoder(new StringSink(decodedIV)));
+
+    // Decrypt using RSA private key
+    string decryptedIV;
+    StringSource(decodedIV, true, new PK_DecryptorFilter(rng, d, new StringSink(decryptedIV)));
+
+    // Print decrypted AES IV
+    cout << "Decrypted AES IV: " << decryptedIV << "\n";
+
+    // Set encryptedKey and encryptedIV to the decrypted values
+    encryptedKey = decryptedKey;
+    encryptedIV = decryptedIV;
+}
+
+// This function will use the decrypted AES key and IV to decrypt the message from the client.
+void DecryptAndDecodeMessage(string& encodedMessage, string& decryptedMessage, string decryptedKey, string decryptedIV) {
+    // Decode from Base64
+    string decodedMessage;
+    StringSource(encodedMessage, true, new Base64Decoder(new StringSink(decodedMessage)));
+
+    // Decrypt using AES key and IV
+    CBC_Mode<AES>::Decryption d;
+    d.SetKeyWithIV((CryptoPP::byte*)decryptedKey.data(), decryptedKey.size(), (CryptoPP::byte*)decryptedIV.data());
+    StringSource(decodedMessage, true, new StreamTransformationFilter(d, new StringSink(decryptedMessage)));
+
+    // Print decrypted message
+    cout << "Decrypted message: " << decryptedMessage << "\n";
+}
+
+// This function will use the decrypted AES key and IV to encrypt a message to send to the client.
+void EncryptAndEncodeMessage(string& message, string& encodedMessage, string decryptedKey, string decryptedIV) {
+    // Encrypt using AES key and IV
+    string encryptedMessage;
+    CBC_Mode<AES>::Encryption e;
+    e.SetKeyWithIV((CryptoPP::byte*)decryptedKey.data(), decryptedKey.size(), (CryptoPP::byte*)decryptedIV.data());
+    StringSource(message, true, new StreamTransformationFilter(e, new StringSink(encryptedMessage)));
+
+    // Encode to Base64
+    StringSource(encryptedMessage, true, new Base64Encoder(new StringSink(encodedMessage)));
+
+    // Print encoded message
+    cout << "Encoded message: " << encodedMessage << "\n";
 }
 
 int main() {
@@ -248,26 +280,59 @@ int main() {
     Sleep(500);
 
     // Receive and decrypt AES key and IV from client
-    char recvbuf[DEFAULT_BUFLEN];
-    int recvbuflen = DEFAULT_BUFLEN;
-    iResult = recv(host.ClientSocket, recvbuf, recvbuflen, 0);
-    if (iResult > 0) {
-        string encodedKey(recvbuf);
-        Sleep(500);
-        iResult = recv(host.ClientSocket, recvbuf, recvbuflen, 0);
+    string encryptedKey;
+    string encryptedIV;
+    ReceiveAndDecryptAESKeyAndIV(host.ClientSocket, encryptedKey, encryptedIV, privateKey);
+
+    Sleep(500);
+
+    // Establish an encrypted communication loop with the client
+    bool keepCommunicating = true;
+    while (keepCommunicating) {
+        // Receive message from client
+        char recvbuf[DEFAULT_BUFLEN];
+        int recvbuflen = DEFAULT_BUFLEN;
+        iResult = recv(host.ClientSocket, recvbuf, DEFAULT_BUFLEN, 0);
         if (iResult > 0) {
-            string encodedIV(recvbuf);
-            cout << "Encoded AES key: " << encodedKey << "\n";
-            cout << "Encoded IV: " << encodedIV << "\n";
-            ReceiveAndDecryptAESKeyAndIV(privateKey, encodedKey, encodedIV);
+            string encodedMessage = recvbuf;
+            string decryptedMessage;
+            cout << "Received encrypted message: " << encodedMessage << "\n";
+            DecryptAndDecodeMessage(encodedMessage, decryptedMessage, encryptedKey, encryptedIV);
         }
-        else if (iResult == 0)
+        else if (iResult == 0) {
             cout << "Connection closed\n";
-        else
-            cout << "recv failed with error: " << WSAGetLastError() << "\n";
+            closesocket(host.ClientSocket);
+            WSACleanup();
+            exit(1);
+        }
+        else {
+            cout << "recv failed with error: " << WSAGetLastError() << endl;
+            closesocket(host.ClientSocket);
+            WSACleanup();
+            exit(1);
+        }
+
+        Sleep(500);
+
+        // Send encoded message to client
+        string message;
+        cout << "Enter a message to send to the client: ";
+        getline(cin, message);
+        string encodedMessage;
+        EncryptAndEncodeMessage(message, encodedMessage, encryptedKey, encryptedIV);
+        iResult = send(host.ClientSocket, encodedMessage.c_str(), encodedMessage.size(), 0);
+        if (iResult == SOCKET_ERROR) {
+            cout << "send failed with error: " << WSAGetLastError() << endl;
+            closesocket(host.ClientSocket);
+            WSACleanup();
+            exit(1);
+        }
+        cout << "Bytes sent: " << iResult << endl;
+
     }
-    else if (iResult == 0)
-        cout << "Connection closed\n";
-    else
-        cout << "recv failed with error: " << WSAGetLastError() << "\n";
+
+    // Clean up socket and shut down
+    closesocket(host.ClientSocket);
+    WSACleanup();
+    return 0;
 }
