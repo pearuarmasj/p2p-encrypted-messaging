@@ -1,4 +1,4 @@
-When / if I ever get around to developing a system, or preferably even a GUI to just input information, for now you must have built and set up Crypto++ 8.9.0 in order to properly compile this of course. As for the compiler itself, I use g++ (GCC) 13.2.0
+When / if I ever get around to developing a system, or preferably even a GUI to just input information, for now you must have built and set up Crypto++ 8.9.0 in order to properly compile this of course. As for the compiler itself, I use g++ (GCC) 13.2.0 that I got from MinGW https://github.com/skeeto/w64devkit/releases/download/v1.21.0/w64devkit-1.21.0.zip
 
 ![image](https://github.com/pearuarmasj/p2p-encrypted-messaging/assets/60179057/4f3d1353-70b3-427f-bbbd-e2c1a05f5e89)
 
