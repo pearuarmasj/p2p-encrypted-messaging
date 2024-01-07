@@ -21,7 +21,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cryptlib.lib")
 #define DEFAULT_PORT "27015"
-#define IP_ADDRESS "127.0.0.1"
+#define IP_ADDRESS "127.0.0.1" // Change this to the IPv4 address of your machine, and port forward it through your router on port 27015, if the client is anywhere other than your local network.
 #define DEFAULT_BUFLEN 262144
 #define RSA_KEYLENGTH 3072
 #define AES_DEFAULT_KEYLENGTH 32
