@@ -1,0 +1,24 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/.vs
+/imgui
+/CppProperties.json
+/bin/HybridClient/x64/Debug
+/intermediate
+/p2p-encr.e3a5b300/x64/Release
+/x64/Release
+/bin/GuiClient/x64/GuiClient.exe
+/bin/GuiClient/x64/imgui.ini
+/bin/GuiClient/x64/peer_id.bin
+/Client.slnx
+/GuiClient.vcxproj.user
+/Host.slnx
+/HybridClient.vcxproj
+/HybridClient.vcxproj.user
+/Hybridclient2.cpp
+/HybridHost.vcxproj
+/HybridHost.vcxproj.user
+/Hybridhost1.cpp
+/p2p-encrypted-messaging.cpp
