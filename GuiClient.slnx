@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="GuiClient/GuiClient.vcxproj" Id="5d33a120-eb9b-4a93-bca1-718b97857c24" />
+</Solution>

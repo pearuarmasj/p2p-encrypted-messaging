@@ -1,0 +1,13 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="GuiClient.vcxproj" Id="9c2a4f55-3b6a-4e39-8d1e-3f0b5c7d0303">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="p2p-encrypted-messaging.vcxproj" Id="e3a5b300-ebdf-40a8-a880-979f3927c4ed">
+    <BuildDependency Project="GuiClient.vcxproj" />
+    <Build Solution="Release|x64" Project="false" />
+  </Project>
+</Solution>
