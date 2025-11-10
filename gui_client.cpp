@@ -1,7 +1,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <tchar.h>
 
 #include <iostream>
 #include <string>
@@ -26,7 +25,6 @@
 #include <queue.h>
 #include <sha.h>
 #include <hmac.h>
-#include <hex.h>
 
 #include <mstcpip.h>
 #include <commctrl.h>
@@ -102,11 +100,66 @@ static bool parseDataPayload(const CryptoPP::SecByteBlock& sessionKey, const vec
     } else if (expectHmac && !hasHmac) { err = "missing hmac"; return false; }
     return true;
 }
+static bool shouldHairpinBind(bool connectOnly, const char* remoteHost, in_addr resolved);
 static bool loadOrCreatePeerId(vector<uint8_t>& idOut){ ifstream in("peer_id.bin", ios::binary); if(in){ vector<uint8_t> buf(32); in.read(reinterpret_cast<char*>(buf.data()), 32); if(in.gcount()==32){ idOut = move(buf); return true; } } idOut.resize(32); CryptoPP::AutoSeededRandomPool rng; rng.GenerateBlock(idOut.data(), idOut.size()); ofstream out("peer_id.bin", ios::binary|ios::trunc); out.write(reinterpret_cast<const char*>(idOut.data()), (std::streamsize)idOut.size()); return true; }
 static bool sendPeerHello(SOCKET s, const vector<uint8_t>& peerId, uint8_t role){ vector<uint8_t> payload; payload.reserve(33); payload.insert(payload.end(), peerId.begin(), peerId.end()); payload.push_back(role); return writeFrame(s, MsgType::PeerHello, payload); }
 static bool recvPeerHello(SOCKET s, vector<uint8_t>& peerIdOut, uint8_t& roleOut){ MsgType t; vector<uint8_t> pl; if(!readFrame(s,t,pl) || t!=MsgType::PeerHello) return false; if(pl.size()!=33) return false; peerIdOut.assign(pl.begin(), pl.begin()+32); roleOut = pl[32]; return true; }
 static string fmtTime(uint64_t ms){ time_t sec = (time_t)(ms/1000); uint64_t rem = ms % 1000; tm t{}; localtime_s(&t,&sec); stringstream ss; ss<< put_time(&t, "%H:%M:%S") << '.' << setw(3) << setfill('0') << rem; return ss.str(); }
 
+// Helper: resolve host (IPv4 literal or DNS) -> in_addr
+static inline string trimCopy(const string& s){
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if(a==string::npos) return {};
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b-a+1);
+}
+static bool isLikelyIPv4Literal(const string& s){
+    int dots=0;
+    for(char c: s){ if(c=='.') ++dots; else if(c<'0'||c>'9') return false; }
+    return dots==3;
+}
+static bool resolveHostIPv4(const string& host, in_addr& out){
+    string h = trimCopy(host);
+    if(isLikelyIPv4Literal(h)){
+        return InetPtonA(AF_INET, h.c_str(), &out)==1;
+    }
+    addrinfo hints{}; hints.ai_family=AF_INET; hints.ai_socktype=SOCK_STREAM; hints.ai_flags=AI_ADDRCONFIG;
+    addrinfo* res=nullptr; if(getaddrinfo(h.c_str(), nullptr, &hints, &res)!=0) return false;
+    bool ok=false; for(addrinfo* p=res;p;p=p->ai_next){ sockaddr_in* sin=(sockaddr_in*)p->ai_addr; if(sin){ out=sin->sin_addr; ok=true; break; } }
+    if(res) freeaddrinfo(res);
+    return ok;
+}
+
+static string getPrimaryLocalIPv4(){
+    ULONG bufLen = 15*1024;
+    vector<char> buf(bufLen);
+    IP_ADAPTER_ADDRESSES* addrs = (IP_ADAPTER_ADDRESSES*)buf.data();
+    if(GetAdaptersAddresses(AF_INET,
+        GAA_FLAG_SKIP_ANYCAST|GAA_FLAG_SKIP_MULTICAST|GAA_FLAG_SKIP_DNS_SERVER,
+        nullptr, addrs, &bufLen) != NO_ERROR) return {};
+    string fallback;
+    for(auto p=addrs; p; p=p->Next){
+        if(p->OperStatus != IfOperStatusUp) continue;
+        for(auto u=p->FirstUnicastAddress; u; u=u->Next){
+            sockaddr_in* sin = (sockaddr_in*)u->Address.lpSockaddr;
+            if(!sin) continue;
+            char ip[64]; inet_ntop(AF_INET,&sin->sin_addr,ip,sizeof(ip));
+            string ipStr = ip;
+            if(ipStr=="127.0.0.1") continue;
+            if(ipStr.rfind("10.",0)==0 ||
+               ipStr.rfind("192.168.",0)==0 ||
+               (ipStr.rfind("172.",0)==0 && [&]{
+                   size_t dot = ipStr.find('.',4);
+                   if(dot==string::npos) return false;
+                   int second = atoi(ipStr.substr(4,dot-4).c_str());
+                   return second>=16 && second<=31;
+               }()))
+                return ipStr;
+            if(fallback.empty()) fallback = ipStr;
+        }
+    }
+    return fallback;
+}
 struct AppState{
     SOCKET sock = INVALID_SOCKET;
     NetSession* session = nullptr;
@@ -125,20 +178,101 @@ struct AppState{
     atomic<bool> sessionChosen{false}; atomic<bool> stopIo{false};
     bool useHmac = true; atomic<bool> listenReady{false};
     bool listenOnly=false; bool connectOnly=false;
-    // Automap state
-    bool autoMap=false; bool natPmpMapped=false; bool upnpMapped=false; uint16_t mappedExternalPort=0; uint16_t mappedInternalPort=0; string upnpControlURL; // for deletion
+    bool autoMap=false; bool natPmpMapped=false; bool upnpMapped=false; uint16_t mappedExternalPort=0; uint16_t mappedInternalPort=0; string upnpControlURL;
+
+    // Own the worker threads
+    std::thread listenThread;
+    std::thread connectThread;
 
     void addLog(const string& s){ lock_guard<mutex> lk(logMutex); log.push_back(s); }
 };
+
+// Define FullDisconnect early so all uses can see it
+static void FullDisconnect(AppState& st, const char* reason);
 
 static bool session_send(struct AppState& st, const string& msg) {
     if (!st.connected || !st.session || !st.sessionReady) return false;
     uint64_t ctr = ++st.sendCounter; vector<uint8_t> out; if (!makeDataPayload(st.sessionKey, ctr, msg, st.rng, out, st.useHmac)) return false; return st.session->sendFrame(MsgType::Data, out);
 }
 
-static bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label){ CryptoPP::InvertibleRSAFunction params; params.GenerateRandomWithKeySize(st.rng, 3072); st.priv = CryptoPP::RSA::PrivateKey(params); st.pub = CryptoPP::RSA::PublicKey(params); loadOrCreatePeerId(st.localPeerId); vector<uint8_t> mypub = serializePublicKey(st.pub); if(!writeFrame(s, MsgType::PublicKey, mypub)){ st.addLog(string(label)+" send PublicKey failed"); return false; } MsgType t; vector<uint8_t> payload; if(!readFrame(s, t, payload) || t!=MsgType::PublicKey){ st.addLog(string(label)+" expected PublicKey"); return false; } if(!loadPublicKey(payload.data(), payload.size(), st.peerPub)){ st.addLog(string(label)+" bad PublicKey"); return false; } vector<uint8_t> remoteId; uint8_t remoteRole=1; if(!sendPeerHello(s, st.localPeerId, 0) || !recvPeerHello(s, remoteId, remoteRole)){ st.addLog(string(label)+" PeerHello fail"); return false; } if(st.sessionChosen.load()){ st.addLog(string(label)+" loser (already chosen)"); return false; } st.remotePeerId = remoteId; st.sock = s; st.connected = true; st.addLog(string(label)+" connected"); st.session = new NetSession(st.sock); st.session->onMessage([&](MsgType mt, const vector<uint8_t>& data){ if (mt == MsgType::SessionOk) { if (st.pendingRekey) { st.sessionKey.Assign(st.pendingKey.data(), st.pendingKey.size()); st.pendingRekey=false; st.lastRecvCounter=0; st.sendCounter.store(0); st.addLog("Re-key complete"); } st.sessionReady = true; st.addLog("Session ready"); st.nextRekey = chrono::steady_clock::now() + chrono::seconds(60); return; } if (mt == MsgType::Data) { if (!st.sessionReady) { st.addLog("Data before session ready"); return; } uint64_t ctr, ts; string msg, err; if (!parseDataPayload(st.sessionKey, data, ctr, ts, msg, st.useHmac, err)) { st.addLog(string("Recv error: ")+err); return; } if (ctr <= st.lastRecvCounter) { st.addLog("Duplicate/out-of-order"); return; } st.lastRecvCounter = ctr; st.addLog(fmtTime(ts)+string(" Peer: ")+msg); return; } }); st.session->onClosed([&]{ st.addLog("Disconnected"); }); st.session->start(); st.sessionKey.CleanNew(32); st.rng.GenerateBlock(st.sessionKey, st.sessionKey.size()); vector<uint8_t> wrapped = rsaWrapAesKey(st.peerPub, st.sessionKey); vector<uint8_t> skPayload; uint16_t klen = (uint16_t)wrapped.size(); skPayload.push_back((uint8_t)((klen >> 8) & 0xFF)); skPayload.push_back((uint8_t)(klen & 0xFF)); skPayload.insert(skPayload.end(), wrapped.begin(), wrapped.end()); if(!writeFrame(st.sock, MsgType::SessionKey, skPayload)){ st.addLog(string(label)+" SessionKey send failed"); st.session->stop(); delete st.session; st.session=nullptr; closesocket(s); st.connected=false; return false; } st.addLog(string(label)+" SessionKey sent"); st.sessionChosen.store(true); return true; }
+static bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label){ CryptoPP::InvertibleRSAFunction params; params.GenerateRandomWithKeySize(st.rng, 3072); st.priv = CryptoPP::RSA::PrivateKey(params); st.pub = CryptoPP::RSA::PublicKey(params); loadOrCreatePeerId(st.localPeerId); vector<uint8_t> mypub = serializePublicKey(st.pub); if(!writeFrame(s, MsgType::PublicKey, mypub)){ st.addLog(string(label)+" send PublicKey failed"); return false; } MsgType t; vector<uint8_t> payload; if(!readFrame(s, t, payload) || t!=MsgType::PublicKey){ st.addLog(string(label)+" expected PublicKey"); return false; } if(!loadPublicKey(payload.data(), payload.size(), st.peerPub)){ st.addLog(string(label)+" bad PublicKey"); return false; } vector<uint8_t> remoteId; uint8_t remoteRole=1; if(!sendPeerHello(s, st.localPeerId, 0) || !recvPeerHello(s, remoteId, remoteRole)){ st.addLog(string(label)+" PeerHello fail"); return false; } if(st.sessionChosen.load()){ st.addLog(string(label)+" loser (already chosen)"); return false; } st.remotePeerId = remoteId; st.sock = s; st.connected = true; st.addLog(string(label)+" connected"); st.session = new NetSession(st.sock); st.session->onMessage([&](MsgType mt, const vector<uint8_t>& data){ if (mt == MsgType::SessionOk) { if (st.pendingRekey) { st.sessionKey.Assign(st.pendingKey.data(), st.pendingKey.size()); st.pendingRekey=false; st.lastRecvCounter=0; st.sendCounter.store(0); st.addLog("Re-key complete"); } st.sessionReady = true; st.addLog("Session ready"); st.nextRekey = chrono::steady_clock::now() + chrono::seconds(60); st.sessionChosen.store(true); return; } if (mt == MsgType::Data) { if (!st.sessionReady) { st.addLog("Data before session ready"); return; } uint64_t ctr, ts; string msg, err; if (!parseDataPayload(st.sessionKey, data, ctr, ts, msg, st.useHmac, err)) { st.addLog(string("Recv error: ")+err); return; } if (ctr <= st.lastRecvCounter) { st.addLog("Duplicate/out-of-order"); return; } st.lastRecvCounter = ctr; st.addLog(fmtTime(ts)+string(" Peer: ")+msg); return; } });
+        st.session->onClosed([&]{ FullDisconnect(st, "peer closed"); });
+        st.session->onError([&]{ FullDisconnect(st, "session error"); });
+        st.session->start(); st.sessionKey.CleanNew(32); st.rng.GenerateBlock(st.sessionKey, st.sessionKey.size()); vector<uint8_t> wrapped = rsaWrapAesKey(st.peerPub, st.sessionKey); vector<uint8_t> skPayload; uint16_t klen = (uint16_t)wrapped.size(); st.addLog(string(label)+" preparing SessionKey frame ("+to_string(klen)+" bytes wrapped)"); skPayload.push_back((uint8_t)((klen >> 8) & 0xFF)); skPayload.push_back((uint8_t)(klen & 0xFF)); skPayload.insert(skPayload.end(), wrapped.begin(), wrapped.end()); if(!st.session->sendFrame(MsgType::SessionKey, skPayload)){ st.addLog(string(label)+" SessionKey send failed"); FullDisconnect(st, "sessionkey send fail"); return false; } st.addLog(string(label)+" SessionKey sent, waiting for SessionOk"); return true; }
 
-static void SimultaneousConnect(AppState& st, const char* remoteHost, uint16_t listenPort, uint16_t remotePort){ if(st.listenOnly) return; sockaddr_in raddr{}; raddr.sin_family=AF_INET; if(InetPtonA(AF_INET, remoteHost, &raddr.sin_addr)!=1){ st.addLog("[connect] bad remote ip"); return; } raddr.sin_port=htons(remotePort); SOCKET cs = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); if(cs==INVALID_SOCKET){ st.addLog("[connect] socket failed"); return; } BOOL yes=1; setsockopt(cs, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes)); sockaddr_in laddr{}; laddr.sin_family=AF_INET; laddr.sin_addr.s_addr=htonl(INADDR_ANY); laddr.sin_port=htons(listenPort); if(::bind(cs, (SOCKADDR*)&laddr, sizeof(laddr))==SOCKET_ERROR){ st.addLog("[connect] bind local failed"); closesocket(cs); return; } u_long nb=1; ioctlsocket(cs, FIONBIO, &nb); int cr = ::connect(cs, (SOCKADDR*)&raddr, sizeof(raddr)); if(cr==SOCKET_ERROR){ int e=WSAGetLastError(); if(e!=WSAEWOULDBLOCK && e!=WSAEINPROGRESS){ st.addLog("[connect] connect immediate fail"); closesocket(cs); return; } } st.addLog("[connect] simultaneous open pending..."); auto simStart = chrono::steady_clock::now(); while(!st.stopIo.load() && !st.sessionChosen.load()){ if(chrono::steady_clock::now() - simStart > chrono::seconds(15)){ st.addLog("[connect] sim-open timeout"); break; } fd_set wfds; FD_ZERO(&wfds); FD_SET(cs,&wfds); timeval tv{0,200*1000}; int r = select(0,nullptr,&wfds,nullptr,&tv); if(r>0 && FD_ISSET(cs,&wfds)){ int soerr=0; int slen=sizeof(soerr); getsockopt(cs, SOL_SOCKET, SO_ERROR, (char*)&soerr, &slen); if(soerr==0){ nb=0; ioctlsocket(cs, FIONBIO, &nb); SOCKET s=cs; cs=INVALID_SOCKET; set_nodelay(s); st.addLog(string("[connect] tuple ")+sock_tuple_str(s)); DoOutboundHandshake(st, s, "[connect]"); return; } else { st.addLog("[connect] failed (SO_ERROR)"); closesocket(cs); return; } } } if(cs!=INVALID_SOCKET) closesocket(cs); }
+static void SimultaneousConnect(AppState& st, const char* remoteHost, uint16_t listenPort, uint16_t remotePort){
+    if(st.listenOnly) return;
+
+    if(remoteHost && strcmp(remoteHost,"0.0.0.0")==0){
+        st.addLog("[connect] remote 0.0.0.0 invalid");
+        return;
+    }
+
+    in_addr resolved{};
+    if(!resolveHostIPv4(remoteHost, resolved)){
+        st.addLog(string("[connect] cannot resolve host: ")+remoteHost);
+        return;
+    }
+
+    char iptxt[64]; inet_ntop(AF_INET, &resolved, iptxt, sizeof(iptxt));
+    st.addLog(string("[connect] input host '") + remoteHost + "' -> resolved " + iptxt);
+
+    bool hairpin = shouldHairpinBind(st.connectOnly, remoteHost, resolved);
+    if (hairpin) st.addLog("[connect] hairpin/self detected -> binding source port");
+
+    sockaddr_in raddr{}; raddr.sin_family = AF_INET; raddr.sin_addr = resolved; raddr.sin_port = htons(remotePort);
+
+    SOCKET cs = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(cs==INVALID_SOCKET){ st.addLog("[connect] socket failed"); return; }
+    BOOL yes=1; setsockopt(cs, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+
+    if(hairpin){
+        sockaddr_in laddr{}; laddr.sin_family=AF_INET; laddr.sin_addr.s_addr=htonl(INADDR_ANY); laddr.sin_port=htons(listenPort);
+        if(::bind(cs,(SOCKADDR*)&laddr,sizeof(laddr))==SOCKET_ERROR){
+            st.addLog("[connect] bind failed"); closesocket(cs); return;
+        }
+    }
+
+    u_long nb=1; ioctlsocket(cs,FIONBIO,&nb);
+    int cr = ::connect(cs,(SOCKADDR*)&raddr,sizeof(raddr));
+    if(cr==SOCKET_ERROR){
+        int e=WSAGetLastError();
+        if(e!=WSAEWOULDBLOCK && e!=WSAEINPROGRESS){
+            st.addLog(string("[connect] connect fail to ")+iptxt+":"+to_string(remotePort)+" err="+to_string(e));
+            closesocket(cs); return;
+        }
+    }
+
+    st.addLog(string("[connect] pending to ")+iptxt+":"+to_string(remotePort)+(hairpin?" (hairpin)":""));
+    auto start = chrono::steady_clock::now();
+    while(!st.stopIo.load() && !st.sessionChosen.load()){
+        if(chrono::steady_clock::now()-start > chrono::seconds(15)){
+            st.addLog("[connect] timeout");
+            break;
+        }
+        fd_set wfds; FD_ZERO(&wfds); FD_SET(cs,&wfds);
+        timeval tv{0,200*1000};
+        int sel = select(0,nullptr,&wfds,nullptr,&tv);
+        if(sel>0 && FD_ISSET(cs,&wfds)){
+            int soerr=0; int slen=sizeof(soerr);
+            getsockopt(cs,SOL_SOCKET,SO_ERROR,(char*)&soerr,&slen);
+            if(soerr==0){
+                nb=0; ioctlsocket(cs,FIONBIO,&nb);
+                SOCKET s=cs; cs=INVALID_SOCKET;
+                set_nodelay(s);
+                st.addLog(string("[connect] tuple ")+sock_tuple_str(s));
+                if(!DoOutboundHandshake(st,s,"[connect]")){
+                    st.addLog("[connect] handshake failed");
+                }
+                return;
+            } else {
+                st.addLog(string("[connect] so_error=")+to_string(soerr));
+                closesocket(cs); return;
+            }
+        }
+    }
+    if(cs!=INVALID_SOCKET) closesocket(cs);
+}
 
 static void ListenAndAccept(AppState& st, uint16_t port){
     if(st.connectOnly) return;
@@ -152,7 +286,7 @@ static void ListenAndAccept(AppState& st, uint16_t port){
     while(!st.stopIo.load() && !st.sessionChosen.load()){
         fd_set fds; FD_ZERO(&fds); FD_SET(ls,&fds); timeval tv{1,0};
         int r = select(0,&fds,nullptr,nullptr,&tv); if(r<=0) continue;
-        SOCKET s = accept(ls,nullptr,nullptr); // fixed: nullptr
+        SOCKET s = accept(ls,nullptr,nullptr);
         if(s==INVALID_SOCKET) continue;
         if(st.sessionChosen.load()) { closesocket(s); break; }
         set_nodelay(s);
@@ -204,7 +338,8 @@ static void ListenAndAccept(AppState& st, uint16_t port){
                 return;
             }
         });
-        st.session->onClosed([&]{ st.addLog("[listen] disconnected"); });
+        st.session->onClosed([&]{ FullDisconnect(st, "[listen] peer closed"); });
+        st.session->onError([&]{ FullDisconnect(st, "[listen] session error"); });
         st.session->start();
         break;
     }
@@ -212,19 +347,70 @@ static void ListenAndAccept(AppState& st, uint16_t port){
     closesocket(ls);
 }
 
-// --- NAT-PMP / UPnP helpers---
-static string getLocalIPv4(){ char hn[256]{}; if(gethostname(hn,sizeof(hn))!=0) return {}; addrinfo hints{}; hints.ai_family=AF_INET; addrinfo* res=nullptr; if(getaddrinfo(hn,nullptr,&hints,&res)!=0) return {}; for(auto p=res;p;p=p->ai_next){ sockaddr_in* sin=(sockaddr_in*)p->ai_addr; char buf[64]; inet_ntop(AF_INET,&sin->sin_addr,buf,sizeof(buf)); freeaddrinfo(res); return buf; } freeaddrinfo(res); return {}; }
-static string getGatewayIPv4(){ ULONG sz=0; GetAdaptersInfo(nullptr,&sz); vector<char> buf(sz); IP_ADAPTER_INFO* ai=(IP_ADAPTER_INFO*)buf.data(); if(GetAdaptersInfo(ai,&sz)!=NO_ERROR) return {}; for(auto p=ai;p;p=p->Next){ if(strlen(p->GatewayList.IpAddress.String)>0) return p->GatewayList.IpAddress.String; } return {}; }
+// NAT-PMP helpers
+static const char* natpmpResultDesc(uint16_t rc){
+    switch(rc){ case 0: return "success"; case 1: return "unsupported version"; case 2: return "not authorized/refused"; case 3: return "network failure"; case 4: return "out of resources"; case 5: return "unsupported opcode"; default: return "unknown"; }
+}
 
-static bool natpmpAdd(uint16_t internalPort, uint16_t& externalPortOut, string& err){ string gw=getGatewayIPv4(); if(gw.empty()){ err="no gw"; return false;} SOCKET s=socket(AF_INET,SOCK_DGRAM,0); if(s==INVALID_SOCKET){ err="sock"; return false;} sockaddr_in g{}; g.sin_family=AF_INET; g.sin_port=htons(5351); InetPtonA(AF_INET, gw.c_str(), &g.sin_addr); unsigned char req[12]{}; req[0]=0; req[1]=2; req[4]=(internalPort>>8)&0xFF; req[5]=internalPort&0xFF; // ext=0 => let NAT choose
- req[10]=0x0E; req[11]=0x10; // 3600s lifetime
- sendto(s,(char*)req,12,0,(sockaddr*)&g,sizeof(g)); fd_set fds; FD_ZERO(&fds); FD_SET(s,&fds); timeval tv{1,0}; if(select(0,&fds,nullptr,nullptr,&tv)<=0){ closesocket(s); err="timeout"; return false;} unsigned char resp[16]; int r=recv(s,(char*)resp,sizeof(resp),0); closesocket(s); if(r<12||resp[1]!=2){ err="bad resp"; return false;} externalPortOut=(uint16_t)((resp[8]<<8)|resp[9]); return true; }
-static bool natpmpDelete(uint16_t internalPort){ string gw=getGatewayIPv4(); if(gw.empty()) return false; SOCKET s=socket(AF_INET,SOCK_DGRAM,0); if(s==INVALID_SOCKET) return false; sockaddr_in g{}; g.sin_family=AF_INET; g.sin_port=htons(5351); InetPtonA(AF_INET, gw.c_str(), &g.sin_addr); unsigned char req[12]{}; req[0]=0; req[1]=2; req[4]=(internalPort>>8)&0xFF; req[5]=internalPort&0xFF; // lifetime 0 -> delete
- sendto(s,(char*)req,12,0,(sockaddr*)&g,sizeof(g)); closesocket(s); return true; }
+static bool natpmpAdd(uint16_t internalPort, uint16_t& externalPortOut, string& err){
+    // Request mapping TCP with desired external == internal
+    sockaddr_in g{}; string gw; {
+        ULONG sz=0; GetAdaptersInfo(nullptr,&sz); if(sz){ vector<char> buf(sz); IP_ADAPTER_INFO* ai=(IP_ADAPTER_INFO*)buf.data(); if(GetAdaptersInfo(ai,&sz)==NO_ERROR){ for(auto p=ai;p;p=p->Next){ if(strlen(p->GatewayList.IpAddress.String)>0){ gw=p->GatewayList.IpAddress.String; break; } } } }
+    }
+    if(gw.empty()){ err="no gw"; return false; }
+    SOCKET s=socket(AF_INET,SOCK_DGRAM,0); if(s==INVALID_SOCKET){ err="sock"; return false; }
+    g.sin_family=AF_INET; g.sin_port=htons(5351); if(InetPtonA(AF_INET, gw.c_str(), &g.sin_addr)!=1){ closesocket(s); err="inet"; return false; }
+    unsigned char req[12]{}; req[0]=0; req[1]=2; // TCP
+    req[4]=(internalPort>>8)&0xFF; req[5]=internalPort&0xFF; // internal port
+    req[6]=(internalPort>>8)&0xFF; req[7]=internalPort&0xFF; // request same external
+    uint32_t lifetime=3600; req[8]=(lifetime>>24)&0xFF; req[9]=(lifetime>>16)&0xFF; req[10]=(lifetime>>8)&0xFF; req[11]=lifetime&0xFF;
+    if(sendto(s,(char*)req,12,0,(sockaddr*)&g,sizeof(g))!=12){ closesocket(s); err="send"; return false; }
+    fd_set fds; FD_ZERO(&fds); FD_SET(s,&fds); timeval tv{2,0}; if(select(0,&fds,nullptr,nullptr,&tv)<=0){ closesocket(s); err="timeout"; return false; }
+    unsigned char resp[32]; int r=recv(s,(char*)resp,sizeof(resp),0); closesocket(s); if(r<16){ err="short"; return false; }
+    if(resp[0]!=0 || resp[1]!=(unsigned char)(2|0x80)){ err="bad op"; return false; }
+    uint16_t rc=(resp[2]<<8)|resp[3]; if(rc!=0){ err=string("rc ")+to_string(rc)+" ("+natpmpResultDesc(rc)+")"; return false; }
+    externalPortOut=(uint16_t)((resp[10]<<8)|resp[11]); // correct external port position
+    return true;
+}
+static bool natpmpDelete(uint16_t internalPort){
+    sockaddr_in g{}; string gw; { ULONG sz=0; GetAdaptersInfo(nullptr,&sz); if(sz){ vector<char> buf(sz); IP_ADAPTER_INFO* ai=(IP_ADAPTER_INFO*)buf.data(); if(GetAdaptersInfo(ai,&sz)==NO_ERROR){ for(auto p=ai;p;p=p->Next){ if(strlen(p->GatewayList.IpAddress.String)>0){ gw=p->GatewayList.IpAddress.String; break; } } } } }
+    if(gw.empty()) return false; SOCKET s=socket(AF_INET,SOCK_DGRAM,0); if(s==INVALID_SOCKET) return false; g.sin_family=AF_INET; g.sin_port=htons(5351); if(InetPtonA(AF_INET,gw.c_str(),&g.sin_addr)!=1){ closesocket(s); return false; }
+    unsigned char req[12]{}; req[0]=0; req[1]=2; req[4]=(internalPort>>8)&0xFF; req[5]=internalPort&0xFF; req[6]=(internalPort>>8)&0xFF; req[7]=internalPort&0xFF; // ext same
+    // lifetime 0 -> delete
+    req[8]=0; req[9]=0; req[10]=0; req[11]=0; sendto(s,(char*)req,12,0,(sockaddr*)&g,sizeof(g)); closesocket(s); return true; }
 
-static bool upnpDiscoverControlURL(string& controlURL, string& hostPort, string& path){ SOCKET s=socket(AF_INET,SOCK_DGRAM,0); if(s==INVALID_SOCKET) return false; sockaddr_in m{}; m.sin_family=AF_INET; m.sin_port=htons(1900); InetPtonA(AF_INET,"239.255.255.250",&m.sin_addr); string req="M-SEARCH * HTTP/1.1\r\nHOST:239.255.255.250:1900\r\nMAN:\"ssdp:discover\"\r\nMX:2\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n"; sendto(s,req.c_str(),(int)req.size(),0,(sockaddr*)&m,sizeof(m)); fd_set fds; FD_ZERO(&fds); FD_SET(s,&fds); timeval tv{3,0}; if(select(0,&fds,nullptr,nullptr,&tv)<=0){ closesocket(s); return false;} char buf[4096]; int r=recv(s,buf,sizeof(buf)-1,0); closesocket(s); if(r<=0){ return false;} buf[r]=0; string resp(buf); auto pos=resp.find("LOCATION:"); if(pos==string::npos) return false; auto end=resp.find('\n',pos); string loc=resp.substr(pos+9,end-pos-9); while(!loc.empty() && (loc[0]==' '||loc[0]=='\r')) loc.erase(loc.begin()); while(!loc.empty() && (loc.back()=='\r'||loc.back()=='\n')) loc.pop_back(); HINTERNET hi=InternetOpenA("P2PChat",INTERNET_OPEN_TYPE_PRECONFIG,NULL,NULL,0); if(!hi) return false; HINTERNET hf=InternetOpenUrlA(hi,loc.c_str(),NULL,0,INTERNET_FLAG_RELOAD,0); if(!hf){ InternetCloseHandle(hi); return false;} string xml; char xbuf[2048]; DWORD rd=0; while(InternetReadFile(hf,xbuf,sizeof(xbuf),&rd) && rd>0) xml.append(xbuf,rd); InternetCloseHandle(hf); InternetCloseHandle(hi); auto svc=xml.find("urn:schemas-upnp-org:service:WANIPConnection:1"); if(svc==string::npos) svc=xml.find("urn:schemas-upnp-org:service:WANPPPConnection:1"); if(svc==string::npos) return false; auto cp=xml.find("<controlURL>",svc); if(cp==string::npos) return false; auto ce=xml.find("</controlURL>",cp); if(ce==string::npos) return false; path=xml.substr(cp+12,ce-(cp+12)); auto protoEnd=loc.find("://"); if(protoEnd==string::npos) return false; auto hostStart=protoEnd+3; auto slash=loc.find('/',hostStart); hostPort=loc.substr(hostStart, slash==string::npos? string::npos: slash-hostStart); if(path.empty()||path[0]!='/') path="/"+path; controlURL=loc.substr(0, hostStart)+hostPort+path; return true; }
-static bool upnpAddPortMapping(uint16_t externalPort,uint16_t internalPort,const string& internalClient,string& controlURL,string& err){ string hostPort,path; if(!upnpDiscoverControlURL(controlURL,hostPort,path)){ err="discover"; return false;} SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP); if(s==INVALID_SOCKET){ err="sock"; return false;} string host=hostPort; string port="80"; auto colon=hostPort.find(':'); if(colon!=string::npos){ host=hostPort.substr(0,colon); port=hostPort.substr(colon+1);} sockaddr_in addr{}; addr.sin_family=AF_INET; addr.sin_port=htons((u_short)atoi(port.c_str())); if(InetPtonA(AF_INET,host.c_str(),&addr.sin_addr)!=1){ err="inet"; closesocket(s); return false;} if(connect(s,(sockaddr*)&addr,sizeof(addr))==SOCKET_ERROR){ err="connect"; closesocket(s); return false;} string body="<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:AddPortMapping xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"><NewExternalPort="+to_string(externalPort)+"</NewExternalPort><NewProtocol>TCP</NewProtocol><NewInternalPort="+to_string(internalPort)+"</NewInternalPort><NewInternalClient="+internalClient+"</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>P2PChat</NewPortMappingDescription><NewLeaseDuration>3600</NewLeaseDuration></u:AddPortMapping></s:Body></s:Envelope>"; string req="POST "+path+" HTTP/1.1\r\nHOST: "+hostPort+"\r\nCONTENT-TYPE: text/xml; charset=\"utf-8\"\r\nCONTENT-LENGTH: "+to_string(body.size())+"\r\nSOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#AddPortMapping\"\r\n\r\n"+body; send(s,req.c_str(),(int)req.size(),0); char resp[2048]; int r=recv(s,resp,sizeof(resp)-1,0); closesocket(s); if(r<=0){ err="noresp"; return false;} resp[r]=0; if(string(resp).find("200 OK")==string::npos){ err="http"; return false;} return true; }
-static void upnpDeletePortMapping(uint16_t externalPort,const string& controlURL){ if(controlURL.empty()) return; string hostPortPath=controlURL.substr(controlURL.find("://")+3); auto slash=hostPortPath.find('/'); if(slash==string::npos) return; string hostPort=hostPortPath.substr(0,slash); string path=hostPortPath.substr(slash); string host=hostPort; string port="80"; auto colon=hostPort.find(':'); if(colon!=string::npos){ host=hostPort.substr(0,colon); port=hostPort.substr(colon+1);} SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP); if(s==INVALID_SOCKET) return; sockaddr_in addr{}; addr.sin_family=AF_INET; addr.sin_port=htons((u_short)atoi(port.c_str())); if(InetPtonA(AF_INET,host.c_str(),&addr.sin_addr)!=1){ closesocket(s); return;} if(connect(s,(sockaddr*)&addr,sizeof(addr))==SOCKET_ERROR){ closesocket(s); return;} string body="<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:DeletePortMapping xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"><NewExternalPort="+to_string(externalPort)+"</NewExternalPort><NewProtocol>TCP</NewProtocol></u:DeletePortMapping></s:Body></s:Envelope>"; string req="POST "+path+" HTTP/1.1\r\nHOST: "+hostPort+"\r\nCONTENT-TYPE: text/xml; charset=\"utf-8\"\r\nCONTENT-LENGTH: "+to_string(body.size())+"\r\nSOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#DeletePortMapping\"\r\n\r\n"+body; send(s,req.c_str(),(int)req.size(),0); char buf[512]; recv(s,buf,sizeof(buf),0); closesocket(s); }
+// UPnP discovery and mapping (unchanged except internal client selection will use primary local IP)
+static bool upnpDiscoverControlURL(string& controlURL, string& hostPort, string& path){ SOCKET s=socket(AF_INET,SOCK_DGRAM,0); if(s==INVALID_SOCKET) return false; int ttl=2; setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, (char*)&ttl, sizeof(ttl)); sockaddr_in m{}; m.sin_family=AF_INET; m.sin_port=htons(1900); InetPtonA(AF_INET,"239.255.255.250",&m.sin_addr); string req1="M-SEARCH * HTTP/1.1\r\nHOST:239.255.255.250:1900\r\nMAN:\"ssdp:discover\"\r\nMX:2\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n"; string req2="M-SEARCH * HTTP/1.1\r\nHOST:239.255.255.250:1900\r\nMAN:\"ssdp:discover\"\r\nMX:2\r\nST:upnp:rootdevice\r\n\r\n"; sendto(s,req1.c_str(),(int)req1.size(),0,(sockaddr*)&m,sizeof(m)); sendto(s,req2.c_str(),(int)req2.size(),0,(sockaddr*)&m,sizeof(m)); fd_set fds; FD_ZERO(&fds); FD_SET(s,&fds); timeval tv{3,0}; if(select(0,&fds,nullptr,nullptr,&tv)<=0){ closesocket(s); return false;} char buf[4096]; int r=recv(s,buf,sizeof(buf)-1,0); closesocket(s); if(r<=0){ return false;} buf[r]=0; string resp(buf); auto pos=resp.find("LOCATION:"); if(pos==string::npos) return false; auto end=resp.find('\n',pos); string loc=resp.substr(pos+9,end-pos-9); while(!loc.empty() && (loc[0]==' '||loc[0]=='\r')) loc.erase(loc.begin()); while(!loc.empty() && (loc.back()=='\r'||loc.back()=='\n')) loc.pop_back(); HINTERNET hi=InternetOpenA("P2PChat",INTERNET_OPEN_TYPE_PRECONFIG,NULL,NULL,0); if(!hi) return false; HINTERNET hf=InternetOpenUrlA(hi,loc.c_str(),NULL,0,INTERNET_FLAG_RELOAD,0); if(!hf){ InternetCloseHandle(hi); return false;} string xml; char xbuf[2048]; DWORD rd=0; while(InternetReadFile(hf,xbuf,sizeof(xbuf),&rd) && rd>0) xml.append(xbuf,rd); InternetCloseHandle(hf); InternetCloseHandle(hi); auto svc=xml.find("urn:schemas-upnp-org:service:WANIPConnection:1"); if(svc==string::npos) svc=xml.find("urn:schemas-upnp-org:service:WANPPPConnection:1"); if(svc==string::npos) return false; auto cp=xml.find("<controlURL>",svc); if(cp==string::npos) return false; auto ce=xml.find("</controlURL>",cp); if(ce==string::npos) return false; path=xml.substr(cp+12,ce-(cp+12)); auto protoEnd=loc.find("://"); if(protoEnd==string::npos) return false; auto hostStart=protoEnd+3; auto slash=loc.find('/',hostStart); hostPort=loc.substr(hostStart, slash==string::npos? string::npos: slash-hostStart); if(path.empty()||path[0]!='/') path="/"+path; controlURL=loc.substr(0, hostStart)+hostPort+path; return true; }
+static bool upnpAddPortMapping(uint16_t externalPort,uint16_t internalPort,const string& internalClient,string& controlURL,string& err){ string hostPort,path; if(!upnpDiscoverControlURL(controlURL,hostPort,path)){ err="discover"; return false;} SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP); if(s==INVALID_SOCKET){ err="sock"; return false;} string host=hostPort; string port="80"; auto colon=hostPort.find(':'); if(colon!=string::npos){ host=hostPort.substr(0,colon); port=hostPort.substr(colon+1);} sockaddr_in addr{}; addr.sin_family=AF_INET; addr.sin_port=htons((u_short)atoi(port.c_str())); if(InetPtonA(AF_INET,host.c_str(),&addr.sin_addr)!=1){ err="inet"; closesocket(s); return false;} if(connect(s,(sockaddr*)&addr,sizeof(addr))==SOCKET_ERROR){ err="connect"; closesocket(s); return false;} string body="<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:AddPortMapping xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"><NewExternalPort>"+to_string(externalPort)+"</NewExternalPort><NewProtocol>TCP</NewProtocol><NewInternalPort>"+to_string(internalPort)+"</NewInternalPort><NewInternalClient>"+internalClient+"</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>P2PChat</NewPortMappingDescription><NewLeaseDuration>3600</NewLeaseDuration></u:AddPortMapping></s:Body></s:Envelope>"; string req="POST "+path+" HTTP/1.1\r\nHOST: "+hostPort+"\r\nCONTENT-TYPE: text/xml; charset=\"utf-8\"\r\nCONTENT-LENGTH: "+to_string(body.size())+"\r\nSOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#AddPortMapping\"\r\n\r\n"+body; send(s,req.c_str(),(int)req.size(),0); char resp[2048]; int r=recv(s,resp,sizeof(resp)-1,0); closesocket(s); if(r<=0){ err="noresp"; return false;} resp[r]=0; if(string(resp).find("200 OK")==string::npos){ err="http"; return false;} return true; }
+static void upnpDeletePortMapping(uint16_t externalPort,const string& controlURL){ if(controlURL.empty()) return; string hostPortPath=controlURL.substr(controlURL.find("://")+3); auto slash=hostPortPath.find('/'); if(slash==string::npos) return; string hostPort=hostPortPath.substr(0,slash); string path=hostPortPath.substr(slash); string host=hostPort; string port="80"; auto colon=hostPort.find(':'); if(colon!=string::npos){ host=hostPort.substr(0,colon); port=hostPort.substr(colon+1);} SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP); if(s==INVALID_SOCKET) return; sockaddr_in addr{}; addr.sin_family=AF_INET; addr.sin_port=htons((u_short)atoi(port.c_str())); if(InetPtonA(AF_INET,host.c_str(),&addr.sin_addr)!=1){ closesocket(s); return;} if(connect(s,(sockaddr*)&addr,sizeof(addr))==SOCKET_ERROR){ closesocket(s); return; } string body="<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:DeletePortMapping xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"><NewExternalPort>"+to_string(externalPort)+"</NewExternalPort><NewProtocol>TCP</NewProtocol></u:DeletePortMapping></s:Body></s:Envelope>"; string req="POST "+path+" HTTP/1.1\r\nHOST: "+hostPort+"\r\nCONTENT-TYPE: text/xml; charset=\"utf-8\"\r\nCONTENT-LENGTH: "+to_string(body.size())+"\r\nSOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#DeletePortMapping\"\r\n\r\n"+body; send(s,req.c_str(),(int)req.size(),0); char buf[512]; recv(s,buf,sizeof(buf),0); closesocket(s); }
+
+// Determine if the resolved IPv4 matches one of our local interface addresses (or STUN external later).
+static bool isLocalAddress(in_addr addr){
+    char candidate[64]; inet_ntop(AF_INET,&addr,candidate,sizeof(candidate));
+    // Enumerate local adapter IPv4s
+    ULONG bufLen=15*1024; vector<char> buf(bufLen);
+    IP_ADAPTER_ADDRESSES* addrs=(IP_ADAPTER_ADDRESSES*)buf.data();
+    if(GetAdaptersAddresses(AF_INET,0,nullptr,addrs,&bufLen)!=NO_ERROR) return false;
+    for(auto p=addrs;p;p=p->Next){
+        for(auto u=p->FirstUnicastAddress; u; u=u->Next){
+            sockaddr_in* sin=(sockaddr_in*)u->Address.lpSockaddr;
+            if(!sin) continue;
+            char ip[64]; inet_ntop(AF_INET,&sin->sin_addr,ip,sizeof(ip));
+            if(strcmp(ip,candidate)==0) return true;
+        }
+    }
+    return false;
+}
+
+// Simple heuristic: treat remote as self if equal to any local or previously discovered external (can store external later).
+static bool shouldHairpinBind(bool connectOnly, const char* remoteHost, in_addr resolved){
+    if(connectOnly) {
+        // For connect-only we normally skip bind; exception: hairpin/self
+        return isLocalAddress(resolved);
+    }
+    // In simultaneous-open mode binding is expected anyway
+    return true;
+}
 
 // UI control IDs
 #define IDC_HOST        1001
@@ -242,13 +428,18 @@ static void upnpDeletePortMapping(uint16_t externalPort,const string& controlURL
 #define IDC_SEND        1013
 #define IDC_STATUS      1014
 
-// Global UI state
-static AppState g_state; static bool g_started=false; static size_t g_logIndex=0;
-static HWND g_hLog=nullptr, g_hInput=nullptr, g_hStatus=nullptr, g_hHost=nullptr, g_hLPort=nullptr, g_hCPort=nullptr, g_hHmac=nullptr, g_hListenOnly=nullptr, g_hConnectOnly=nullptr, g_hAutoMap=nullptr;
+static AppState g_state; static bool g_started=false; static size_t g_logIndex=0; static HWND g_hLog=nullptr, g_hInput=nullptr, g_hStatus=nullptr, g_hHost=nullptr, g_hLPort=nullptr, g_hCPort=nullptr, g_hHmac=nullptr, g_hListenOnly=nullptr, g_hConnectOnly=nullptr, g_hAutoMap=nullptr;
 
 static void SetCtlFont(HWND h){ SendMessage(h, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE); }
 static void AppendLogLine(const string& line){ if(!g_hLog) return; int len=GetWindowTextLengthA(g_hLog); SendMessage(g_hLog, EM_SETSEL, len, len); string s=line+"\r\n"; SendMessageA(g_hLog, EM_REPLACESEL, FALSE, (LPARAM)s.c_str()); }
-static void RefreshUi(){ while(g_logIndex < g_state.log.size()) AppendLogLine(g_state.log[g_logIndex++]); if(g_hStatus){ const char* sttxt = g_state.connected? (g_state.sessionReady? "Ready" : "Handshaking") : (g_started? "Connecting/Listening" : "Idle"); SetWindowTextA(g_hStatus, sttxt); } }
+static void RefreshUi(){
+    vector<string> newLines; {
+        lock_guard<mutex> lk(g_state.logMutex);
+        while(g_logIndex < g_state.log.size()) newLines.push_back(g_state.log[g_logIndex++]);
+    }
+    for(auto& l: newLines) AppendLogLine(l);
+    if(g_hStatus){ const char* sttxt = g_state.connected? (g_state.sessionReady? "Ready" : "Handshaking") : (g_started? "Connecting/Listening" : "Idle"); SetWindowTextA(g_hStatus, sttxt); }
+}
 
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam){
     switch(msg){
@@ -275,7 +466,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         SetTimer(hwnd,1,250,nullptr);
         return 0; }
     case WM_TIMER: RefreshUi(); return 0;
-    case WM_COMMAND:{ int id=LOWORD(wParam); if(id==IDC_START){
+    case WM_COMMAND:{ int id=LOWORD(wParam);
+        if(id==IDC_LISTENONLY){ BOOL listenChecked = SendMessage(g_hListenOnly,BM_GETCHECK,0,0)==BST_CHECKED; if(listenChecked){ EnableWindow(g_hHost,FALSE); SetWindowTextA(g_hHost,"0.0.0.0"); } else { EnableWindow(g_hHost,TRUE); if(SendMessage(g_hHost, WM_GETTEXTLENGTH,0,0)==0) SetWindowTextA(g_hHost,"127.0.0.1"); } return 0; }
+        if(id==IDC_START){
             char hostBuf[256]{}; GetWindowTextA(g_hHost, hostBuf, sizeof(hostBuf));
             char lbuf[32]{}; GetWindowTextA(g_hLPort, lbuf, sizeof(lbuf)); int listenPort=atoi(lbuf);
             char cbuf[32]{}; GetWindowTextA(g_hCPort, cbuf, sizeof(cbuf)); int connectPort=atoi(cbuf);
@@ -287,13 +480,54 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             g_state.stopIo.store(false); g_state.sessionChosen.store(false); g_state.connected=false; g_state.sessionReady=false; g_state.lastRecvCounter=0; g_state.sendCounter.store(0); g_state.listenReady.store(false);
             g_started=true; g_state.addLog(string("Starting modes: ") + (g_state.listenOnly?"listen":"") + (g_state.connectOnly? (g_state.listenOnly?"+connect":"connect") : (!g_state.listenOnly?"listen+connect":"")) + (g_state.autoMap?" +automap":""));
             const uint16_t lport=(uint16_t)listenPort; const uint16_t cport=(uint16_t)connectPort; string host=hostBuf;
-            if(g_state.autoMap && !g_state.connectOnly){ g_state.mappedInternalPort=lport; string err; uint16_t ext=0; if(natpmpAdd(lport, ext, err)){ g_state.natPmpMapped=true; g_state.mappedExternalPort=ext; g_state.addLog(string("NAT-PMP mapped ")+to_string(lport)+" -> "+to_string(ext)); } else { string uerr; string ctrl; if(upnpAddPortMapping(lport,lport,getLocalIPv4(),ctrl,uerr)){ g_state.upnpMapped=true; g_state.upnpControlURL=ctrl; g_state.mappedExternalPort=lport; g_state.addLog(string("UPnP mapped external ")+to_string(lport)); } else { g_state.addLog(string("Auto-map failed PMP:")+err+" UPnP:"+uerr); } } }
-            if(!g_state.connectOnly){ thread([&]{ ListenAndAccept(g_state,lport); }).detach(); }
-            if(!g_state.listenOnly){ thread([&]{ SimultaneousConnect(g_state, host.c_str(), lport, cport); }).detach(); }
+            if(g_state.listenOnly) host = "0.0.0.0"; // enforce listen host
+            // Start automap in background to avoid UI freeze
+            if(g_state.autoMap && !g_state.connectOnly){
+                g_state.addLog("Auto-map starting...");
+                thread([lport]{
+                    uint16_t ext=0; string err; if(natpmpAdd(lport, ext, err)){
+                        g_state.natPmpMapped=true; g_state.mappedExternalPort=ext; g_state.mappedInternalPort=lport; g_state.addLog(string("NAT-PMP mapped ")+to_string(lport)+" -> "+to_string(ext));
+                    } else {
+                        string uerr; string ctrl; string localIp=getPrimaryLocalIPv4(); if(localIp.empty()) localIp="0.0.0.0"; if(upnpAddPortMapping(lport,lport,localIp,ctrl,uerr)){
+                            g_state.upnpMapped=true; g_state.upnpControlURL=ctrl; g_state.mappedExternalPort=lport; g_state.mappedInternalPort=lport; g_state.addLog(string("UPnP mapped external ")+to_string(lport));
+                        } else {
+                            g_state.addLog(string("Auto-map failed PMP:")+err+" UPnP:"+uerr);
+                        }
+                    }
+                }).detach();
+            }
+            if(!g_state.connectOnly){
+                if(g_state.listenThread.joinable()) g_state.listenThread.join();
+                g_state.listenThread = std::thread([&]{ ListenAndAccept(g_state,lport); });
+            }
+            if(!g_state.listenOnly){
+                if(g_state.connectThread.joinable()) g_state.connectThread.join();
+                g_state.connectThread = std::thread([&]{ SimultaneousConnect(g_state, host.c_str(), lport, cport); });
+            }
             return 0; }
-        if(id==IDC_STOP){ g_state.stopIo.store(true); g_state.listenReady.store(false); if(g_state.natPmpMapped){ natpmpDelete(g_state.mappedInternalPort); g_state.addLog("NAT-PMP mapping removed"); } if(g_state.upnpMapped){ upnpDeletePortMapping(g_state.mappedExternalPort, g_state.upnpControlURL); g_state.addLog("UPnP mapping removed"); } g_state.natPmpMapped=false; g_state.upnpMapped=false; g_state.upnpControlURL.clear(); if(g_state.sock!=INVALID_SOCKET){ shutdown(g_state.sock,SD_BOTH); closesocket(g_state.sock); g_state.sock=INVALID_SOCKET; } if(g_state.session){ g_state.session->stop(); delete g_state.session; g_state.session=nullptr; } g_state.connected=false; g_state.sessionReady=false; g_started=false; g_state.addLog("Stopped"); return 0; }
+        if(id==IDC_STOP){
+            FullDisconnect(g_state, "user stop");
+            if(g_state.natPmpMapped){ natpmpDelete(g_state.mappedInternalPort); g_state.addLog("NAT-PMP mapping removed"); }
+            if(g_state.upnpMapped){ upnpDeletePortMapping(g_state.mappedExternalPort, g_state.upnpControlURL); g_state.addLog("UPnP mapping removed"); }
+            g_state.natPmpMapped=false; g_state.upnpMapped=false; g_state.upnpControlURL.clear();
+            g_started=false; g_state.addLog("Stopped"); return 0; }
         if(id==IDC_STUN){ stun::MappedAddress ma; string err; if(stun::GetMappedAddress("stun.l.google.com",19302,3000,ma,err)){ g_state.addLog(string("External: ")+ma.ip+":"+to_string(ma.port)); } else { g_state.addLog(string("STUN fail: ")+err); } return 0; }
-        if(id==IDC_SEND){ char buf[1024]{}; GetWindowTextA(g_hInput, buf, sizeof(buf)); if(buf[0]){ string msg=buf; SetWindowTextA(g_hInput, ""); if(session_send(g_state,msg)){ uint64_t nowMs=(uint64_t)chrono::duration_cast<chrono::milliseconds>(chrono::system_clock::now().time_since_epoch()).count(); g_state.addLog(fmtTime(nowMs)+string(" You: ")+msg); } else { g_state.addLog("Send failed or not ready"); } } return 0; }
+        // FIX send button handler (replace broken ifsession_send... fragment)
+        if(id==IDC_SEND){
+            char buf[1024]{}; GetWindowTextA(g_hInput, buf, sizeof(buf));
+            if(buf[0]){
+                string msg = buf;
+                SetWindowTextA(g_hInput, "");
+                if(session_send(g_state, msg)){
+                    uint64_t nowMs = (uint64_t)chrono::duration_cast<chrono::milliseconds>(
+                        chrono::system_clock::now().time_since_epoch()).count();
+                    g_state.addLog(fmtTime(nowMs)+string(" You: ")+msg);
+                } else {
+                    g_state.addLog("Send failed or not ready");
+                }
+            }
+            return 0;
+        }
         return 0; }
     case WM_CLOSE: DestroyWindow(hwnd); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -301,7 +535,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     }
 }
 
-// Entry point
 int APIENTRY WinMain(HINSTANCE hInst,HINSTANCE,LPSTR, int){
     SetCurrentProcessExplicitAppUserModelID(L"Tumblechat.App");
     WSADATA wsd; if(WSAStartup(MAKEWORD(2,2),&wsd)!=0){ MessageBoxA(NULL,"WSAStartup failed","Error",MB_ICONERROR); return 1; }
@@ -312,3 +545,17 @@ int APIENTRY WinMain(HINSTANCE hInst,HINSTANCE,LPSTR, int){
     MSG msg; while(GetMessage(&msg,NULL,0,0)>0){ TranslateMessage(&msg); DispatchMessage(&msg); }
     g_state.stopIo.store(true); if(g_state.session){ g_state.session->stop(); delete g_state.session; g_state.session=nullptr; } if(g_state.sock!=INVALID_SOCKET){ shutdown(g_state.sock,SD_BOTH); closesocket(g_state.sock); }
     WSACleanup(); return 0; }
+
+// Define FullDisconnect once here
+static void FullDisconnect(AppState& st, const char* reason){
+    st.stopIo.store(true);
+    if(reason && *reason) st.addLog(string("[close] ")+reason);
+
+    // join worker threads (avoid Stop crash)
+    if(st.listenThread.joinable()) st.listenThread.join();
+    if(st.connectThread.joinable()) st.connectThread.join();
+
+    if(st.session){ NetSession* s = st.session; st.session=nullptr; s->stop(); delete s; }
+    if(st.sock!=INVALID_SOCKET){ shutdown(st.sock,SD_BOTH); closesocket(st.sock); st.sock=INVALID_SOCKET; }
+    st.connected=false; st.sessionReady=false; st.sessionChosen.store(false); st.listenReady.store(false);
+}

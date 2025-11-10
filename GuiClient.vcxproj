@@ -68,6 +68,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="gui_client.cpp" />
+    <ClCompile Include="gui_client_debug.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="protocol.h" />

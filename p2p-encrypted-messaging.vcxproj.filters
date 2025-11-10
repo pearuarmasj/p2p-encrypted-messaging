@@ -41,6 +41,9 @@
     <ClCompile Include="gui_client.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="gui_client_debug.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="p2p-encrypted-messaging.rc">

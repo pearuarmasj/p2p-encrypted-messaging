@@ -140,6 +140,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="gui_client.cpp" />
+    <ClCompile Include="gui_client_debug.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="p2p-encrypted-messaging.rc" />
