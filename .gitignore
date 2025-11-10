@@ -22,3 +22,5 @@
 /HybridHost.vcxproj.user
 /Hybridhost1.cpp
 /p2p-encrypted-messaging.cpp
+/peer_id.bin
+*.diagsession
