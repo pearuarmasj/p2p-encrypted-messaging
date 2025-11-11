@@ -15,6 +15,7 @@
 #include <rsa.h>
 #include <secblock.h>
 
+#include "protocol.h"
 #include "netsession.h"
 
 // Application state structure
