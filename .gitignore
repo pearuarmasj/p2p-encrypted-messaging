@@ -24,3 +24,4 @@
 /p2p-encrypted-messaging.cpp
 /peer_id.bin
 *.diagsession
+/bin/GuiClient/x64/Release/peer_id.bin
