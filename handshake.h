@@ -223,7 +223,10 @@ static inline void SimultaneousConnect(AppState& st, const char* remoteHost, uin
                 int connectError = netEvents.iErrorCode[FD_CONNECT_BIT];
                 if (connectError == 0) {
                     // Success - restore blocking mode and disable event notifications
-                    WSAEventSelect(cs, hEvent, 0);
+                    if (WSAEventSelect(cs, hEvent, 0) == SOCKET_ERROR) {
+                        st.addLog("[connect] WSAEventSelect failed when disabling event notifications");
+                        break;
+                    }
                     u_long nb = 0;
                     ioctlsocket(cs, FIONBIO, &nb);
                     
