@@ -23,9 +23,16 @@ struct AppState {
     SOCKET sock = INVALID_SOCKET;
     NetSession* session = nullptr;
     CryptoPP::AutoSeededRandomPool rng;
+    // RSA keys (4096-bit for strong asymmetric encryption)
     CryptoPP::RSA::PrivateKey priv;
     CryptoPP::RSA::PublicKey pub;
     CryptoPP::RSA::PublicKey peerPub;
+    // ECDH keys (P-521 curve for second asymmetric standard)
+    CryptoPP::ECDH<CryptoPP::ECP>::Domain ecdhDomain;
+    CryptoPP::SecByteBlock ecdhPrivKey;
+    CryptoPP::SecByteBlock ecdhPubKey;
+    CryptoPP::SecByteBlock peerEcdhPubKey;
+    // Session key (derived from hybrid RSA+ECDH)
     CryptoPP::SecByteBlock sessionKey;
     bool sessionReady = false;
     bool connected = false;

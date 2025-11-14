@@ -15,6 +15,30 @@
 #include <queue.h>
 #include <sha.h>
 #include <hmac.h>
+#include <eccrypto.h>
+#include <oids.h>
+#include <hkdf.h>
+#include <asn.h>
+#include <dh.h>
+
+// RSA key generation (strengthened to 4096 bits)
+static inline void generateRSAKeyPair(CryptoPP::AutoSeededRandomPool& rng,
+    CryptoPP::RSA::PrivateKey& priv, CryptoPP::RSA::PublicKey& pub) {
+    CryptoPP::InvertibleRSAFunction params;
+    params.GenerateRandomWithKeySize(rng, 4096);  // Increased from 3072 to 4096
+    priv = CryptoPP::RSA::PrivateKey(params);
+    pub = CryptoPP::RSA::PublicKey(params);
+}
+
+// ECDH key generation (P-521 curve for high security)
+static inline void generateECDHKeyPair(CryptoPP::AutoSeededRandomPool& rng,
+    CryptoPP::ECDH<CryptoPP::ECP>::Domain& dh,
+    CryptoPP::SecByteBlock& privKey, CryptoPP::SecByteBlock& pubKey) {
+    dh.AccessGroupParameters().Initialize(CryptoPP::ASN1::secp521r1());
+    privKey.CleanNew(dh.PrivateKeyLength());
+    pubKey.CleanNew(dh.PublicKeyLength());
+    dh.GenerateKeyPair(rng, privKey, pubKey);
+}
 
 // RSA key serialization
 static inline std::vector<uint8_t> serializePublicKey(const CryptoPP::RSA::PublicKey& pub) {
@@ -37,7 +61,122 @@ static inline bool loadPublicKey(const uint8_t* data, size_t len, CryptoPP::RSA:
     }
 }
 
-// RSA key wrapping
+// ECDH public key serialization
+static inline std::vector<uint8_t> serializeECDHPublicKey(const CryptoPP::SecByteBlock& pubKey) {
+    return std::vector<uint8_t>(pubKey.begin(), pubKey.end());
+}
+
+static inline bool loadECDHPublicKey(const uint8_t* data, size_t len, CryptoPP::SecByteBlock& pubKey) {
+    try {
+        pubKey.Assign(data, len);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Hybrid key derivation using both RSA and ECDH
+static inline bool deriveHybridSessionKey(CryptoPP::AutoSeededRandomPool& rng,
+    const CryptoPP::RSA::PublicKey& peerRsaPub,
+    const CryptoPP::SecByteBlock& peerEcdhPub,
+    const CryptoPP::SecByteBlock& myEcdhPriv,
+    CryptoPP::ECDH<CryptoPP::ECP>::Domain& dh,
+    CryptoPP::SecByteBlock& sessionKeyOut,
+    std::vector<uint8_t>& rsaWrappedOut) {
+    try {
+        // Generate a random seed for RSA encryption
+        CryptoPP::SecByteBlock rsaSeed(32);
+        rng.GenerateBlock(rsaSeed, rsaSeed.size());
+        
+        // RSA-wrap the seed
+        CryptoPP::RSAES_OAEP_SHA_Encryptor enc(peerRsaPub);
+        std::string wrapped;
+        CryptoPP::StringSource ss(rsaSeed.data(), rsaSeed.size(), true,
+            new CryptoPP::PK_EncryptorFilter(rng, enc, new CryptoPP::StringSink(wrapped)));
+        rsaWrappedOut.assign(wrapped.begin(), wrapped.end());
+        
+        // Perform ECDH key agreement
+        CryptoPP::SecByteBlock ecdhShared(dh.AgreedValueLength());
+        if (!dh.Agree(ecdhShared, myEcdhPriv, peerEcdhPub)) {
+            return false;
+        }
+        
+        // Combine RSA seed and ECDH shared secret using HKDF
+        sessionKeyOut.CleanNew(32); // AES-256 key
+        CryptoPP::HKDF<CryptoPP::SHA256> hkdf;
+        
+        // Concatenate both secrets as input key material
+        CryptoPP::SecByteBlock ikm;
+        ikm.Assign(rsaSeed.data(), rsaSeed.size());
+        ikm.Append(ecdhShared.data(), ecdhShared.size());
+        
+        // Generate a random salt for HKDF
+        CryptoPP::SecByteBlock salt(32);
+        rng.GenerateBlock(salt, salt.size());
+        
+        // Derive session key with HKDF
+        std::string info = "p2p-session-key-v1";
+        hkdf.DeriveKey(sessionKeyOut, sessionKeyOut.size(),
+            ikm, ikm.size(),
+            salt, salt.size(), // session-specific salt
+            reinterpret_cast<const CryptoPP::byte*>(info.data()), info.size());
+        
+        return true;
+    } catch (const CryptoPP::Exception& e) {
+        std::cerr << "Hybrid key derivation error: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// Unwrap hybrid session key
+static inline bool unwrapHybridSessionKey(const CryptoPP::RSA::PrivateKey& myRsaPriv,
+    const uint8_t* rsaWrappedData, size_t rsaWrappedLen,
+    const CryptoPP::SecByteBlock& myEcdhPriv,
+    const CryptoPP::SecByteBlock& peerEcdhPub,
+    CryptoPP::ECDH<CryptoPP::ECP>::Domain& dh,
+    CryptoPP::SecByteBlock& sessionKeyOut) {
+    try {
+        // RSA-unwrap the seed
+        CryptoPP::AutoSeededRandomPool rng;
+        CryptoPP::RSAES_OAEP_SHA_Decryptor dec(myRsaPriv);
+        std::string unwrappedSeed;
+        CryptoPP::StringSource ss(rsaWrappedData, rsaWrappedLen, true,
+            new CryptoPP::PK_DecryptorFilter(rng, dec, new CryptoPP::StringSink(unwrappedSeed)));
+        
+        CryptoPP::SecByteBlock rsaSeed(reinterpret_cast<const CryptoPP::byte*>(unwrappedSeed.data()),
+            unwrappedSeed.size());
+        
+        // Perform ECDH key agreement
+        CryptoPP::SecByteBlock ecdhShared(dh.AgreedValueLength());
+        if (!dh.Agree(ecdhShared, myEcdhPriv, peerEcdhPub)) {
+            return false;
+        }
+        
+        // Combine RSA seed and ECDH shared secret using HKDF
+        sessionKeyOut.CleanNew(32); // AES-256 key
+        CryptoPP::HKDF<CryptoPP::SHA256> hkdf;
+        
+        // Concatenate both secrets as input key material
+        CryptoPP::SecByteBlock ikm;
+        ikm.Assign(rsaSeed.data(), rsaSeed.size());
+        ikm.Append(ecdhShared.data(), ecdhShared.size());
+        
+        // Derive session key with HKDF
+        std::string info = "p2p-session-key-v1";
+        std::string salt = "p2p-session-salt-v1";
+        hkdf.DeriveKey(sessionKeyOut, sessionKeyOut.size(),
+            ikm, ikm.size(),
+            reinterpret_cast<const CryptoPP::byte*>(salt.data()), salt.size(),
+            reinterpret_cast<const CryptoPP::byte*>(info.data()), info.size());
+        
+        return true;
+    } catch (const CryptoPP::Exception& e) {
+        std::cerr << "Hybrid key unwrap error: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// Legacy RSA-only key wrapping (kept for backward compatibility)
 static inline std::vector<uint8_t> rsaWrapAesKey(const CryptoPP::RSA::PublicKey& pub, const CryptoPP::SecByteBlock& aesKey) {
     CryptoPP::AutoSeededRandomPool rng;
     CryptoPP::RSAES_OAEP_SHA_Encryptor enc(pub);

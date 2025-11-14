@@ -21,27 +21,32 @@ static inline const char* natpmpResultDesc(uint16_t rc) {
     }
 }
 
+// Common gateway discovery function (eliminates duplication)
+static inline bool discoverGateway(std::string& gwOut) {
+    ULONG sz = 0;
+    GetAdaptersInfo(nullptr, &sz);
+    if (sz == 0) {
+        return false;
+    }
+    std::vector<char> buf(sz);
+    IP_ADAPTER_INFO* ai = (IP_ADAPTER_INFO*)buf.data();
+    if (GetAdaptersInfo(ai, &sz) != NO_ERROR) {
+        return false;
+    }
+    for (auto p = ai; p; p = p->Next) {
+        if (strlen(p->GatewayList.IpAddress.String) > 0) {
+            gwOut = p->GatewayList.IpAddress.String;
+            return true;
+        }
+    }
+    return false;
+}
+
 static inline bool natpmpAdd(uint16_t internalPort, uint16_t& externalPortOut, std::string& err) {
     // Request mapping TCP with desired external == internal
     sockaddr_in g{};
     std::string gw;
-    {
-        ULONG sz = 0;
-        GetAdaptersInfo(nullptr, &sz);
-        if (sz) {
-            std::vector<char> buf(sz);
-            IP_ADAPTER_INFO* ai = (IP_ADAPTER_INFO*)buf.data();
-            if (GetAdaptersInfo(ai, &sz) == NO_ERROR) {
-                for (auto p = ai; p; p = p->Next) {
-                    if (strlen(p->GatewayList.IpAddress.String) > 0) {
-                        gw = p->GatewayList.IpAddress.String;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (gw.empty()) {
+    if (!discoverGateway(gw)) {
         err = "no gw";
         return false;
     }
@@ -106,23 +111,7 @@ static inline bool natpmpAdd(uint16_t internalPort, uint16_t& externalPortOut, s
 static inline bool natpmpDelete(uint16_t internalPort) {
     sockaddr_in g{};
     std::string gw;
-    {
-        ULONG sz = 0;
-        GetAdaptersInfo(nullptr, &sz);
-        if (sz) {
-            std::vector<char> buf(sz);
-            IP_ADAPTER_INFO* ai = (IP_ADAPTER_INFO*)buf.data();
-            if (GetAdaptersInfo(ai, &sz) == NO_ERROR) {
-                for (auto p = ai; p; p = p->Next) {
-                    if (strlen(p->GatewayList.IpAddress.String) > 0) {
-                        gw = p->GatewayList.IpAddress.String;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (gw.empty())
+    if (!discoverGateway(gw))
         return false;
     SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s == INVALID_SOCKET)
