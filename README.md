@@ -16,7 +16,7 @@ These were also present under my user variables above, but I haven't touched or 
 
 This application now implements **hybrid asymmetric encryption** using TWO industry-standard cryptographic systems:
 
-### 🔐 Dual Asymmetric Encryption Standards
+### Dual Asymmetric Encryption Standards
 
 1. **RSA-4096 with OAEP Padding**
    - 4096-bit key size for strong security (~152-bit security level)
@@ -28,7 +28,7 @@ This application now implements **hybrid asymmetric encryption** using TWO indus
    - ~256-bit equivalent security level
    - Used for Diffie-Hellman key agreement
 
-### 🛡️ Hybrid Key Derivation
+### Hybrid Key Derivation
 
 Session keys are derived by **combining both RSA and ECDH** using HKDF-SHA256:
 - RSA encrypts a random seed
@@ -36,23 +36,9 @@ Session keys are derived by **combining both RSA and ECDH** using HKDF-SHA256:
 - Both secrets are combined using HKDF (HMAC-based Key Derivation Function)
 - Result: AES-256 session key protected by both cryptosystems
 
-### ✨ Security Benefits
+### Security Benefits
 
 - **Defense-in-Depth**: Both RSA and ECDH must be compromised to break encryption
 - **Forward Secrecy**: Ephemeral ECDH keys generated per session
 - **Post-Quantum Readiness**: Hybrid approach provides migration path
 - **Industry Standard**: Uses well-vetted Crypto++ library implementations
-
-### 📚 Documentation
-
-See these files for detailed information:
-- **[ENCRYPTION.md](ENCRYPTION.md)** - Comprehensive security architecture documentation
-- **[REFACTORING_SUMMARY.md](REFACTORING_SUMMARY.md)** - Code quality improvements
-- **[VERIFICATION.md](VERIFICATION.md)** - Implementation verification report
-
-### 🔧 Recent Improvements
-
-- Eliminated ~75 lines of duplicated code
-- Strengthened encryption from RSA-3072 to hybrid RSA-4096 + ECDH-P521
-- Added proper key derivation using HKDF-SHA256
-- Improved code organization and maintainability
