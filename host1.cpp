@@ -15,12 +15,12 @@
 #include <secblock.h>      // For CryptoPP SecByteBlock
 #include <hex.h>           // For CryptoPP HexEncoder
 #include <files.h>         // For CryptoPP FileSink and FileSource
+#include "shared_crypto.h" // Shared encryption and serialization functions
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cryptlib.lib")
 #define DEFAULT_PORT "27015"
 #define IP_ADDRESS "127.0.0.1" // Change this to your local IPv4 address on your machine and port forward it through your router if you want to connect to this server from another machine on the internet
-#define DEFAULT_BUFLEN 65536
 // This will be the program that the host will run, and the client will connect to.
 
 using namespace std;
@@ -60,118 +60,7 @@ void SendKeyAndIV(SOCKET& ClientSocket, const CryptoPP::byte key[AES::DEFAULT_KE
     }
 }
 
-void EncryptMessage(const string& plain, string& cipher, const CryptoPP::byte key[AES::DEFAULT_KEYLENGTH], const CryptoPP::byte iv[AES::BLOCKSIZE]) {
-    try {
-        CBC_Mode<AES>::Encryption encryption;
-        encryption.SetKeyWithIV(key, AES::DEFAULT_KEYLENGTH, iv);
-
-        // The StreamTransformationFilter adds padding as required.
-        StringSource ss(plain, true,
-            new StreamTransformationFilter(encryption,
-                new Base64Encoder(new StringSink(cipher), false) // false for no newline
-            )
-        );
-    } catch (const Exception& e) {
-        cerr << "Error in EncryptMessage: " << e.what() << endl;
-    }
-}
-
-void DecryptMessage(const string& cipher, string& plain, const CryptoPP::byte key[AES::DEFAULT_KEYLENGTH], const CryptoPP::byte iv[AES::BLOCKSIZE]) {
-    try {
-        CBC_Mode<AES>::Decryption decryption;
-        decryption.SetKeyWithIV(key, AES::DEFAULT_KEYLENGTH, iv);
-
-        StringSource ss(cipher, true,
-            new Base64Decoder(
-                new StreamTransformationFilter(decryption,
-                    new StringSink(plain)
-                )
-            )
-        );
-    } catch (const Exception& e) {
-        cerr << "Error in DecryptMessage: " << e.what() << endl;
-    }
-}
-
-string recvMessage(SOCKET ListenSocket, const CryptoPP::SecByteBlock &key, const CryptoPP::SecByteBlock &iv) {
-    char recvbuf[DEFAULT_BUFLEN];
-    string message;
-    int iResult;
-
-    do {
-        iResult = recv(ListenSocket, recvbuf, DEFAULT_BUFLEN, 0);
-        if (iResult > 0) {
-            message.append(recvbuf, iResult);
-        } else if (iResult == 0) {
-            cout << "Connection closing..." << endl;
-        } else {
-            cout << "recv failed with error: " << WSAGetLastError() << endl;
-            // Handle error, close socket, etc.
-            break;
-        }
-    } while (iResult == DEFAULT_BUFLEN); // If the buffer was filled, there might be more data.
-
-    string plain;
-    DecryptMessage(message, plain, key, iv);
-    return plain;
-}
-
-// Serialization of the key and IV blocks for sending over the network, using hex encoding
-void SerializeSecByteBlocks(const CryptoPP::SecByteBlock& key, const CryptoPP::SecByteBlock& iv, string& serialized) {
-    // Serialize the key
-    string serializedKey;
-    StringSource ss(key.data(), key.size(), true,
-        new HexEncoder(
-            new StringSink(serializedKey)
-        )
-    );
-
-    // Serialize the IV
-    string serializedIV;
-    StringSource ss2(iv.data(), iv.size(), true,
-        new HexEncoder(
-            new StringSink(serializedIV)
-        )
-    );
-
-    // Concatenate the key and IV
-    serialized = serializedKey + serializedIV;
-}
-
-// Deserialize the SecByteBlocks from the client using hex decoding, and print the key and IV to the console
-void DeserializeSecByteBlocks(const string& serialized, CryptoPP::SecByteBlock& key, CryptoPP::SecByteBlock& iv) {
-    // Deserialize the key
-    string serializedKey = serialized.substr(0, AES::DEFAULT_KEYLENGTH * 2);
-    StringSource ss(serializedKey, true,
-        new HexDecoder(
-            new ArraySink((CryptoPP::byte*)key, AES::DEFAULT_KEYLENGTH)
-        )
-    );
-
-    // Deserialize the IV
-    string serializedIV = serialized.substr(AES::DEFAULT_KEYLENGTH * 2, AES::BLOCKSIZE * 2);
-    StringSource ss2(serializedIV, true,
-        new HexDecoder(
-            new ArraySink((CryptoPP::byte*)iv, AES::BLOCKSIZE)
-        )
-    );
-
-    // Print the key and IV to the console
-    cout << "Key: ";
-    StringSource ss3(key.data(), key.size(), true,
-        new HexEncoder(
-            new FileSink(cout)
-        )
-    );
-    cout << endl;
-    cout << "IV: ";
-    StringSource ss4(iv.data(), iv.size(), true,
-        new HexEncoder(
-            new FileSink(cout)
-        )
-    );
-    cout << endl;
-}
+// Functions moved to shared_crypto.h
 
 // Send the HEX serialized blocks to the client
 void SendSerializedBlocks(SOCKET& ClientSocket, const string& serialized) {
