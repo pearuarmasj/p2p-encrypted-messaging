@@ -27,3 +27,10 @@
 /bin/GuiClient/x64/Release/peer_id.bin
 /bin/GuiClient/x64/Release/Tumblechat.exe
 /bin/GuiClient/x64/Release/Tumblechat.pdb
+/client2.cpp
+/client2.exe
+/gui_client_debug.cpp
+/host1.cpp
+/host1.exe
+/Hybridclient2.exe
+/Hybridhost1.exe
