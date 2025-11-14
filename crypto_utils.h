@@ -21,6 +21,31 @@
 #include <asn.h>
 #include <dh.h>
 
+// Simple hex helpers for debug logging
+static inline std::string toHex(const uint8_t* data, size_t len, size_t maxOut = 1024) {
+    static const char* hex = "0123456789ABCDEF";
+    size_t outLen = std::min(len, maxOut);
+    std::string s; s.reserve(outLen * 2 + (len > maxOut ? 3 : 0));
+    for (size_t i = 0; i < outLen; ++i) {
+        uint8_t b = data[i];
+        s.push_back(hex[b >> 4]);
+        s.push_back(hex[b & 0xF]);
+    }
+    if (len > maxOut) s.append("...");
+    return s;
+}
+
+static inline std::string toHex(const CryptoPP::SecByteBlock& b, size_t maxOut = 1024) {
+    return toHex(b.data(), b.size(), maxOut);
+}
+
+static inline std::string sha256Hex(const uint8_t* data, size_t len) {
+    CryptoPP::SHA256 sha;
+    uint8_t d[CryptoPP::SHA256::DIGESTSIZE];
+    sha.CalculateDigest(d, data, len);
+    return toHex(d, sizeof(d));
+}
+
 // RSA key generation (strengthened to 4096 bits)
 static inline void generateRSAKeyPair(CryptoPP::AutoSeededRandomPool& rng,
     CryptoPP::RSA::PrivateKey& priv, CryptoPP::RSA::PublicKey& pub) {
@@ -44,6 +69,15 @@ static inline void generateECDHKeyPair(CryptoPP::AutoSeededRandomPool& rng,
 static inline std::vector<uint8_t> serializePublicKey(const CryptoPP::RSA::PublicKey& pub) {
     CryptoPP::ByteQueue q;
     pub.Save(q);
+    size_t n = q.CurrentSize();
+    std::vector<uint8_t> buf(n);
+    q.Get(buf.data(), n);
+    return buf;
+}
+
+static inline std::vector<uint8_t> serializePrivateKey(const CryptoPP::RSA::PrivateKey& priv) {
+    CryptoPP::ByteQueue q;
+    priv.Save(q);
     size_t n = q.CurrentSize();
     std::vector<uint8_t> buf(n);
     q.Get(buf.data(), n);

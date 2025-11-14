@@ -42,6 +42,9 @@ static void RefreshUi(){
     if(g_hStatus){ const char* sttxt = g_state.connected? (g_state.sessionReady? "Ready" : "Handshaking") : (g_started? "Connecting/Listening" : "Idle"); SetWindowTextA(g_hStatus, sttxt); }
 }
 
+static LRESULT CALLBACK InputEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam){
     switch(msg){
     case WM_CREATE:{
@@ -60,6 +63,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         CreateWindowExA(0, "BUTTON", "Stop", WS_CHILD|WS_VISIBLE, 1060,8,55,22, hwnd, (HMENU)IDC_STOP, 0, 0);
         g_hLog = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL, 10,40,1105,360, hwnd, (HMENU)IDC_LOG, 0, 0);
         g_hInput = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL, 10,405,1030,24, hwnd, (HMENU)IDC_INPUT, 0, 0);
+        // Enable Enter-to-send on the input box
+        SetWindowSubclass(g_hInput, InputEditProc, 1, 0);
         CreateWindowExA(0, "BUTTON", "Send", WS_CHILD|WS_VISIBLE, 1045,405,70,24, hwnd, (HMENU)IDC_SEND, 0, 0);
         g_hStatus = CreateWindowExA(0, "STATIC", "Idle", WS_CHILD|WS_VISIBLE, 10,435,300,20, hwnd, (HMENU)IDC_STATUS, 0, 0);
         // Fonts
@@ -134,6 +139,35 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_DESTROY: PostQuitMessage(0); return 0;
     default: return DefWindowProc(hwnd,msg,wParam,lParam);
     }
+}
+
+// Handles Enter in the message input box only
+static LRESULT CALLBACK InputEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                      UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (msg) {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            // Only send if there is text
+            if (GetWindowTextLengthA(hWnd) > 0) {
+                HWND parent = GetParent(hWnd);
+                if (parent) {
+                    // Reuse existing send handler
+                    PostMessage(parent, WM_COMMAND, MAKEWPARAM(IDC_SEND, 0), (LPARAM)hWnd);
+                }
+            }
+            // Eat the key (no beep)
+            return 0;
+        }
+        break;
+    case WM_CHAR:
+        // Also eat the translated char for Enter
+        if (wParam == '\r' || wParam == '\n') return 0;
+        break;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hWnd, InputEditProc, uIdSubclass);
+        break;
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
 int APIENTRY WinMain(HINSTANCE hInst,HINSTANCE,LPSTR, int){
