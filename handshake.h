@@ -23,15 +23,8 @@ static inline bool session_send(struct AppState& st, const std::string& msg) {
     uint64_t ctr = ++st.sendCounter;
     std::vector<uint8_t> out;
 
-    // Debug: before encrypt
-    st.addLog(std::string("[crypto] encrypt ctr=") + std::to_string(ctr) + " msg='" + msg + "'");
-
     if (!makeDataPayload(st.sessionKey, ctr, msg, st.rng, out, st.useHmac))
         return false;
-
-    // Debug: encrypted payload (nonce|clen|cipher)
-    st.addLog(std::string("[crypto] encrypted payload bytes=") + std::to_string(out.size()));
-    st.addLog(std::string("[crypto] encrypted payload hex=") + toHex(out.data(), out.size(), 2048));
 
     return st.session->sendFrame(MsgType::Data, out);
 }
@@ -42,10 +35,6 @@ static inline void handleDataMessage(AppState& st, const std::vector<uint8_t>& d
         st.addLog(std::string(label) + " Data before session ready");
         return;
     }
-
-    // Debug: log raw encrypted payload
-    st.addLog(std::string(label) + " [crypto] recv encrypted payload bytes=" + std::to_string(data.size()));
-    st.addLog(std::string(label) + " [crypto] recv encrypted payload hex=" + toHex(data.data(), data.size(), 2048));
 
     uint64_t ctr, ts;
     std::string msg, err;
@@ -59,10 +48,6 @@ static inline void handleDataMessage(AppState& st, const std::vector<uint8_t>& d
     }
     st.lastRecvCounter = ctr;
 
-    // Debug: decrypted content
-    st.addLog(std::string(label) + " [crypto] decrypted ctr=" + std::to_string(ctr) +
-        " ts=" + std::to_string(ts) + " msg='" + msg + "'");
-
     st.addLog(fmtTime(ts) + std::string(" Peer: ") + msg);
 }
 
@@ -71,29 +56,18 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
     // Generate RSA keypair (4096-bit)
     generateRSAKeyPair(st.rng, st.priv, st.pub);
 
-    // Debug: print my RSA keys
-    {
-        auto pubSer = serializePublicKey(st.pub);
-        auto privSer = serializePrivateKey(st.priv);
-        st.addLog(std::string(label) + " [crypto] local RSA pub len=" + std::to_string(pubSer.size()));
-        st.addLog(std::string(label) + " [crypto] local RSA pub hex=" + toHex(pubSer.data(), pubSer.size(), 2048));
-        st.addLog(std::string(label) + " [crypto] local RSA priv len=" + std::to_string(privSer.size()));
-        st.addLog(std::string(label) + " [crypto] local RSA priv hex=" + toHex(privSer.data(), privSer.size(), 2048));
-    }
+    // RSA keypair generated (logging keys removed for security)
     
     // Generate ECDH keypair (P-521 curve)
     generateECDHKeyPair(st.rng, st.ecdhDomain, st.ecdhPrivKey, st.ecdhPubKey);
 
-    // Debug: ECDH keys
-    st.addLog(std::string(label) + " [crypto] local ECDH pub hex=" + toHex(st.ecdhPubKey, 2048));
-    st.addLog(std::string(label) + " [crypto] local ECDH priv hex=" + toHex(st.ecdhPrivKey, 512));
+    // ECDH keypair generated (logging keys removed for security)
     
     loadOrCreatePeerId(st.localPeerId);
     
     // Send RSA public key
     std::vector<uint8_t> mypub = serializePublicKey(st.pub);
     st.addLog(std::string(label) + " sending RSA PublicKey (" + std::to_string(mypub.size()) + " bytes)");
-    st.addLog(std::string(label) + " RSA PublicKey hex=" + toHex(mypub.data(), mypub.size(), 2048));
     if (!writeFrame(s, MsgType::PublicKey, mypub)) {
         st.addLog(std::string(label) + " send PublicKey failed");
         return false;
@@ -107,7 +81,6 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
         return false;
     }
     st.addLog(std::string(label) + " received peer RSA PublicKey (" + std::to_string(payload.size()) + " bytes)");
-    st.addLog(std::string(label) + " peer RSA PublicKey hex=" + toHex(payload.data(), payload.size(), 2048));
     if (!loadPublicKey(payload.data(), payload.size(), st.peerPub)) {
         st.addLog(std::string(label) + " bad PublicKey");
         return false;
@@ -116,7 +89,6 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
     // Send ECDH public key
     std::vector<uint8_t> myEcdhPub = serializeECDHPublicKey(st.ecdhPubKey);
     st.addLog(std::string(label) + " sending ECDH PublicKey (" + std::to_string(myEcdhPub.size()) + " bytes)");
-    st.addLog(std::string(label) + " ECDH PublicKey hex=" + toHex(myEcdhPub.data(), myEcdhPub.size(), 2048));
     if (!writeFrame(s, MsgType::ECDHPublicKey, myEcdhPub)) {
         st.addLog(std::string(label) + " send ECDHPublicKey failed");
         return false;
@@ -128,7 +100,6 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
         return false;
     }
     st.addLog(std::string(label) + " received peer ECDH PublicKey (" + std::to_string(payload.size()) + " bytes)");
-    st.addLog(std::string(label) + " peer ECDH PublicKey hex=" + toHex(payload.data(), payload.size(), 2048));
     if (!loadECDHPublicKey(payload.data(), payload.size(), st.peerEcdhPubKey)) {
         st.addLog(std::string(label) + " bad ECDHPublicKey");
         return false;
@@ -182,10 +153,7 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
         return false;
     }
 
-    // Debug: show wrapped key and session key
-    st.addLog(std::string(label) + " [crypto] rsa-wrapped seed bytes=" + std::to_string(rsaWrapped.size()));
-    st.addLog(std::string(label) + " [crypto] rsa-wrapped seed hex=" + toHex(rsaWrapped.data(), rsaWrapped.size(), 2048));
-    st.addLog(std::string(label) + " [crypto] sessionKey sha256=" + sha256Hex(st.sessionKey.data(), st.sessionKey.size()));
+    // Session key derived (details not logged for security)
     
     std::vector<uint8_t> skPayload;
     uint16_t klen = (uint16_t)rsaWrapped.size();
@@ -389,29 +357,18 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
         // Generate RSA keypair (4096-bit)
         generateRSAKeyPair(st.rng, st.priv, st.pub);
 
-        // Debug: print my RSA keys
-        {
-            auto pubSer = serializePublicKey(st.pub);
-            auto privSer = serializePrivateKey(st.priv);
-            st.addLog(std::string("[listen] [crypto] local RSA pub len=") + std::to_string(pubSer.size()));
-            st.addLog(std::string("[listen] [crypto] local RSA pub hex=") + toHex(pubSer.data(), pubSer.size(), 2048));
-            st.addLog(std::string("[listen] [crypto] local RSA priv len=") + std::to_string(privSer.size()));
-            st.addLog(std::string("[listen] [crypto] local RSA priv hex=") + toHex(privSer.data(), privSer.size(), 2048));
-        }
+        // RSA keypair generated (logging keys removed for security)
         
         // Generate ECDH keypair (P-521 curve)
         generateECDHKeyPair(st.rng, st.ecdhDomain, st.ecdhPrivKey, st.ecdhPubKey);
 
-        // Debug: ECDH keys
-        st.addLog(std::string("[listen] [crypto] local ECDH pub hex=") + toHex(st.ecdhPubKey, 2048));
-        st.addLog(std::string("[listen] [crypto] local ECDH priv hex=") + toHex(st.ecdhPrivKey, 512));
+        // ECDH keypair generated (logging keys removed for security)
         
         loadOrCreatePeerId(st.localPeerId);
         
         // Send RSA public key
         std::vector<uint8_t> hostPubSer = serializePublicKey(st.pub);
         st.addLog(std::string("[listen] sending RSA PublicKey (") + std::to_string(hostPubSer.size()) + " bytes)");
-        st.addLog(std::string("[listen] RSA PublicKey hex=") + toHex(hostPubSer.data(), hostPubSer.size(), 2048));
         if (!writeFrame(s, MsgType::PublicKey, hostPubSer)) {
             closesocket(s);
             continue;
@@ -425,7 +382,6 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
             continue;
         }
         st.addLog(std::string("[listen] received peer RSA PublicKey (") + std::to_string(pl.size()) + " bytes)");
-        st.addLog(std::string("[listen] peer RSA PublicKey hex=") + toHex(pl.data(), pl.size(), 2048));
         if (!loadPublicKey(pl.data(), pl.size(), st.peerPub)) {
             closesocket(s);
             continue;
@@ -434,7 +390,6 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
         // Send ECDH public key
         std::vector<uint8_t> myEcdhPub = serializeECDHPublicKey(st.ecdhPubKey);
         st.addLog(std::string("[listen] sending ECDH PublicKey (") + std::to_string(myEcdhPub.size()) + " bytes)");
-        st.addLog(std::string("[listen] ECDH PublicKey hex=") + toHex(myEcdhPub.data(), myEcdhPub.size(), 2048));
         if (!writeFrame(s, MsgType::ECDHPublicKey, myEcdhPub)) {
             closesocket(s);
             continue;
@@ -446,7 +401,6 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
             continue;
         }
         st.addLog(std::string("[listen] received peer ECDH PublicKey (") + std::to_string(pl.size()) + " bytes)");
-        st.addLog(std::string("[listen] peer ECDH PublicKey hex=") + toHex(pl.data(), pl.size(), 2048));
         if (!loadECDHPublicKey(pl.data(), pl.size(), st.peerEcdhPubKey)) {
             closesocket(s);
             continue;
@@ -478,11 +432,7 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
                 }
                 const uint8_t* rkptr = data.data() + 2;
 
-                // Debug: wrapped seed
-                st.addLog(std::string("[listen] [crypto] recv rsa-wrapped seed bytes=") + std::to_string(rklen));
-                st.addLog(std::string("[listen] [crypto] recv rsa-wrapped seed hex=") + toHex(rkptr, rklen, 2048));
-                
-                // Unwrap hybrid session key using both RSA and ECDH
+                // Unwrap hybrid session key using both RSA and ECDH (details not logged for security)
                 if (!unwrapHybridSessionKey(st.priv, rkptr, rklen,
                                            st.ecdhPrivKey, st.peerEcdhPubKey,
                                            st.ecdhDomain, st.sessionKey)) {
@@ -490,9 +440,6 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
                     return;
                 }
 
-                // Debug: derived session key
-                st.addLog(std::string("[listen] [crypto] sessionKey sha256=") + sha256Hex(st.sessionKey.data(), st.sessionKey.size()));
-                
                 st.session->sendFrame(MsgType::SessionOk, {});
                 st.sessionReady = true;
                 st.addLog("[listen] Session ready (Hybrid RSA-4096 + ECDH-P521 encryption)");
