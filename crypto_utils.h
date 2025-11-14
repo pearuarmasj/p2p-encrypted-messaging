@@ -153,9 +153,9 @@ static inline bool unwrapHybridSessionKey(const CryptoPP::RSA::PrivateKey& myRsa
         CryptoPP::HKDF<CryptoPP::SHA256> hkdf;
         
         // Concatenate both secrets as input key material
-        CryptoPP::SecByteBlock ikm(rsaSeed.size() + ecdhShared.size());
-        memcpy(ikm.data(), rsaSeed.data(), rsaSeed.size());
-        memcpy(ikm.data() + rsaSeed.size(), ecdhShared.data(), ecdhShared.size());
+        CryptoPP::SecByteBlock ikm;
+        ikm.Assign(rsaSeed.data(), rsaSeed.size());
+        ikm.Append(ecdhShared.data(), ecdhShared.size());
         
         // Derive session key with HKDF
         std::string info = "p2p-session-key-v1";
