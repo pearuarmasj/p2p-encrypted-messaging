@@ -201,7 +201,7 @@ static inline void SimultaneousConnect(AppState& st, const char* remoteHost, uin
     auto start = std::chrono::steady_clock::now();
     
     // Wait for connect event or timeout/cancellation
-    while (!st.stopIo.load() && !st.sessionChosen.load()) {
+    while (!st.stopIo.load(std::memory_order_acquire) && !st.sessionChosen.load(std::memory_order_acquire)) {
         auto elapsed = std::chrono::steady_clock::now() - start;
         if (elapsed > std::chrono::seconds(15)) {
             st.addLog("[connect] timeout");
