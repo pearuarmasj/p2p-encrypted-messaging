@@ -118,7 +118,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             g_state.natPmpMapped=false; g_state.upnpMapped=false; g_state.upnpControlURL.clear();
             g_started=false; g_state.addLog("Stopped"); return 0; }
         if(id==IDC_STUN){ stun::MappedAddress ma; string err; if(stun::GetMappedAddress("stun.l.google.com",19302,3000,ma,err)){ g_state.addLog(string("External: ")+ma.ip+":"+to_string(ma.port)); } else { g_state.addLog(string("STUN fail: ")+err); } return 0; }
-        // FIX send button handler (replace broken ifsession_send... fragment)
         if(id==IDC_SEND){
             char buf[1024]{}; GetWindowTextA(g_hInput, buf, sizeof(buf));
             if(buf[0]){
