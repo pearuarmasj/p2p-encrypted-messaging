@@ -110,11 +110,15 @@ static inline bool deriveHybridSessionKey(CryptoPP::AutoSeededRandomPool& rng,
         ikm.Assign(rsaSeed.data(), rsaSeed.size());
         ikm.Append(ecdhShared.data(), ecdhShared.size());
         
+        // Generate a random salt for HKDF
+        CryptoPP::SecByteBlock salt(32);
+        rng.GenerateBlock(salt, salt.size());
+        
         // Derive session key with HKDF
         std::string info = "p2p-session-key-v1";
         hkdf.DeriveKey(sessionKeyOut, sessionKeyOut.size(),
             ikm, ikm.size(),
-            nullptr, 0, // no salt
+            salt, salt.size(), // session-specific salt
             reinterpret_cast<const CryptoPP::byte*>(info.data()), info.size());
         
         return true;
