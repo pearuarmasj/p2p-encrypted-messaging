@@ -169,13 +169,29 @@ static inline void SimultaneousConnect(AppState& st, const char* remoteHost, uin
         }
     }
 
-    u_long nb = 1;
-    ioctlsocket(cs, FIONBIO, &nb);
+    // Create event for connect notification
+    WSAEVENT hEvent = WSACreateEvent();
+    if (hEvent == WSA_INVALID_EVENT) {
+        st.addLog("[connect] WSACreateEvent failed");
+        closesocket(cs);
+        return;
+    }
+
+    // Request FD_CONNECT event notification
+    if (WSAEventSelect(cs, hEvent, FD_CONNECT) == SOCKET_ERROR) {
+        st.addLog("[connect] WSAEventSelect failed");
+        WSACloseEvent(hEvent);
+        closesocket(cs);
+        return;
+    }
+
     int cr = ::connect(cs, (SOCKADDR*)&raddr, sizeof(raddr));
+    // connect will return SOCKET_ERROR with WSAEWOULDBLOCK because of WSAEventSelect
     if (cr == SOCKET_ERROR) {
         int e = WSAGetLastError();
-        if (e != WSAEWOULDBLOCK && e != WSAEINPROGRESS) {
+        if (e != WSAEWOULDBLOCK) {
             st.addLog(std::string("[connect] connect fail to ") + iptxt + ":" + std::to_string(remotePort) + " err=" + std::to_string(e));
+            WSACloseEvent(hEvent);
             closesocket(cs);
             return;
         }
@@ -183,38 +199,62 @@ static inline void SimultaneousConnect(AppState& st, const char* remoteHost, uin
 
     st.addLog(std::string("[connect] pending to ") + iptxt + ":" + std::to_string(remotePort) + (hairpin ? " (hairpin)" : ""));
     auto start = std::chrono::steady_clock::now();
-    while (!st.stopIo.load() && !st.sessionChosen.load()) {
-        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(15)) {
+    
+    // Wait for connect event or timeout/cancellation
+    while (!st.stopIo.load(std::memory_order_acquire) && !st.sessionChosen.load(std::memory_order_acquire)) {
+        auto elapsed = std::chrono::steady_clock::now() - start;
+        if (elapsed > std::chrono::seconds(15)) {
             st.addLog("[connect] timeout");
             break;
         }
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(cs, &wfds);
-        timeval tv{ 0, 200 * 1000 };
-        int sel = select(0, nullptr, &wfds, nullptr, &tv);
-        if (sel > 0 && FD_ISSET(cs, &wfds)) {
-            int soerr = 0;
-            int slen = sizeof(soerr);
-            getsockopt(cs, SOL_SOCKET, SO_ERROR, (char*)&soerr, &slen);
-            if (soerr == 0) {
-                nb = 0;
-                ioctlsocket(cs, FIONBIO, &nb);
-                SOCKET s = cs;
-                cs = INVALID_SOCKET;
-                set_nodelay(s);
-                st.addLog(std::string("[connect] tuple ") + sock_tuple_str(s));
-                if (!DoOutboundHandshake(st, s, "[connect]")) {
-                    st.addLog("[connect] handshake failed");
-                }
-                return;
-            } else {
-                st.addLog(std::string("[connect] so_error=") + std::to_string(soerr));
-                closesocket(cs);
-                return;
+        
+        // Wait up to 200ms for event (allows periodic cancellation check)
+        DWORD waitResult = WSAWaitForMultipleEvents(1, &hEvent, FALSE, 200, FALSE);
+        
+        if (waitResult == WSA_WAIT_EVENT_0) {
+            // Event signaled - check network events
+            WSANETWORKEVENTS netEvents{};
+            if (WSAEnumNetworkEvents(cs, hEvent, &netEvents) == SOCKET_ERROR) {
+                st.addLog("[connect] WSAEnumNetworkEvents failed");
+                break;
             }
+            
+            if (netEvents.lNetworkEvents & FD_CONNECT) {
+                int connectError = netEvents.iErrorCode[FD_CONNECT_BIT];
+                if (connectError == 0) {
+                    // Success - restore blocking mode and disable event notifications
+                    if (WSAEventSelect(cs, hEvent, 0) == SOCKET_ERROR) {
+                        st.addLog("[connect] WSAEventSelect failed when disabling event notifications");
+                        break;
+                    }
+                    u_long nb = 0;
+                    ioctlsocket(cs, FIONBIO, &nb);
+                    
+                    WSACloseEvent(hEvent);
+                    SOCKET s = cs;
+                    cs = INVALID_SOCKET;
+                    set_nodelay(s);
+                    st.addLog(std::string("[connect] tuple ") + sock_tuple_str(s));
+                    if (!DoOutboundHandshake(st, s, "[connect]")) {
+                        st.addLog("[connect] handshake failed");
+                    }
+                    return;
+                } else {
+                    st.addLog(std::string("[connect] connect error=") + std::to_string(connectError));
+                    break;
+                }
+            }
+        } else if (waitResult == WSA_WAIT_TIMEOUT) {
+            // Timeout - loop continues to check stopIo/sessionChosen
+            continue;
+        } else {
+            // Error
+            st.addLog("[connect] WSAWaitForMultipleEvents failed");
+            break;
         }
     }
+    
+    WSACloseEvent(hEvent);
     if (cs != INVALID_SOCKET)
         closesocket(cs);
 }

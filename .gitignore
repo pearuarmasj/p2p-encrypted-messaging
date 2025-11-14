@@ -25,3 +25,5 @@
 /peer_id.bin
 *.diagsession
 /bin/GuiClient/x64/Release/peer_id.bin
+/bin/GuiClient/x64/Release/Tumblechat.exe
+/bin/GuiClient/x64/Release/Tumblechat.pdb

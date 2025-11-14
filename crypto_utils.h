@@ -162,13 +162,18 @@ static inline bool parseDataPayload(const CryptoPP::SecByteBlock& sessionKey,
         err = "short plain";
         return false;
     }
-    // If HMAC present, must be at least 32 bytes long; detect dynamically if not expecting strictly
-    bool hasHmac = plain.size() >= 16 + 32;
-    size_t macOff = hasHmac ? (plain.size() - 32) : plain.size();
-    counterOut = read_u64be(plain, 0);
-    tsMsOut = read_u64be(plain, 8);
-    msgOut.assign(plain.begin() + 16, plain.begin() + macOff);
-    if (expectHmac && hasHmac) {
+    
+    // Only process HMAC when expectHmac is true
+    size_t macOff = plain.size();
+    if (expectHmac) {
+        // HMAC must be present and 32 bytes long
+        if (plain.size() < 16 + 32) {
+            err = "missing hmac";
+            return false;
+        }
+        macOff = plain.size() - 32;
+        
+        // Verify HMAC
         CryptoPP::HMAC<CryptoPP::SHA256> hmac(sessionKey, sessionKey.size());
         hmac.Update(reinterpret_cast<const CryptoPP::byte*>(plain.data()), macOff);
         CryptoPP::byte mac[32];
@@ -177,9 +182,12 @@ static inline bool parseDataPayload(const CryptoPP::SecByteBlock& sessionKey,
             err = "hmac mismatch";
             return false;
         }
-    } else if (expectHmac && !hasHmac) {
-        err = "missing hmac";
-        return false;
     }
+    
+    // Ensure plain is large enough for counter and timestamp
+    counterOut = read_u64be(plain, 0);
+    tsMsOut = read_u64be(plain, 8);
+    msgOut.assign(plain.begin() + 16, plain.begin() + macOff);
+    
     return true;
 }
