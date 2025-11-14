@@ -73,23 +73,8 @@ void ReceiveSerializedSecByteBlocks(SOCKET& ConnectSocket, CryptoPP::SecByteBloc
     // Receive the serialized key and IV
     char recvbuf[DEFAULT_BUFLEN];
     int iResult = recv(ConnectSocket, recvbuf, DEFAULT_BUFLEN, 0);
-    // Print the serialized blocks to the console
     if (iResult > 0) {
         cout << "Received serialized key and IV: " << recvbuf << endl;
-    }
-    else if (iResult == 0) {
-        cout << "Connection closed." << endl;
-        closesocket(ConnectSocket);
-        WSACleanup();
-        exit(1);
-    }
-    else {
-        cout << "recv failed with error: " << WSAGetLastError() << endl;
-        closesocket(ConnectSocket);
-        WSACleanup();
-        exit(1);
-    }
-    if (iResult > 0) {
         // Deserialize the key and IV
         string serialized(recvbuf, iResult);
         DeserializeSecByteBlocks(serialized, key, iv);
