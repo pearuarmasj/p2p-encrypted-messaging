@@ -163,9 +163,10 @@ static inline bool unwrapHybridSessionKey(const CryptoPP::RSA::PrivateKey& myRsa
         
         // Derive session key with HKDF
         std::string info = "p2p-session-key-v1";
+        std::string salt = "p2p-session-salt-v1";
         hkdf.DeriveKey(sessionKeyOut, sessionKeyOut.size(),
             ikm, ikm.size(),
-            nullptr, 0, // no salt
+            reinterpret_cast<const CryptoPP::byte*>(salt.data()), salt.size(),
             reinterpret_cast<const CryptoPP::byte*>(info.data()), info.size());
         
         return true;
