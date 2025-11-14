@@ -185,10 +185,6 @@ static inline bool parseDataPayload(const CryptoPP::SecByteBlock& sessionKey,
     }
     
     // Ensure plain is large enough for counter and timestamp
-    if (plain.size() < 16) {
-        err = "short plain for counter/timestamp";
-        return false;
-    }
     counterOut = read_u64be(plain, 0);
     tsMsOut = read_u64be(plain, 8);
     msgOut.assign(plain.begin() + 16, plain.begin() + macOff);
