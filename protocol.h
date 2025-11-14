@@ -5,7 +5,7 @@
 
 // Message types
 enum class MsgType : uint8_t {
-    PublicKey   = 0x01,
+    PublicKey   = 0x01,  // RSA public key
     // One-time session AES key wrapped with RSA (client->server or server->client)
     SessionKey  = 0x02,
     // ACK for session setup
@@ -14,6 +14,8 @@ enum class MsgType : uint8_t {
     SessionError= 0x04,
     // PeerId/Version exchange
     PeerHello   = 0x05,
+    // ECDH public key exchange (new for hybrid encryption)
+    ECDHPublicKey = 0x06,
     // Application data encrypted with established session AES key
     Data        = 0x11
 };

@@ -27,18 +27,44 @@ static inline bool session_send(struct AppState& st, const std::string& msg) {
     return st.session->sendFrame(MsgType::Data, out);
 }
 
-// Outbound handshake logic
+// Common data message handler (eliminates duplication)
+static inline void handleDataMessage(AppState& st, const std::vector<uint8_t>& data, const char* label) {
+    if (!st.sessionReady) {
+        st.addLog(std::string(label) + " Data before session ready");
+        return;
+    }
+    uint64_t ctr, ts;
+    std::string msg, err;
+    if (!parseDataPayload(st.sessionKey, data, ctr, ts, msg, st.useHmac, err)) {
+        st.addLog(std::string(label) + " Recv error: " + err);
+        return;
+    }
+    if (ctr <= st.lastRecvCounter) {
+        st.addLog(std::string(label) + " Duplicate/out-of-order");
+        return;
+    }
+    st.lastRecvCounter = ctr;
+    st.addLog(fmtTime(ts) + std::string(" Peer: ") + msg);
+}
+
+// Outbound handshake logic with hybrid encryption (RSA + ECDH)
 static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label) {
-    CryptoPP::InvertibleRSAFunction params;
-    params.GenerateRandomWithKeySize(st.rng, 3072);
-    st.priv = CryptoPP::RSA::PrivateKey(params);
-    st.pub = CryptoPP::RSA::PublicKey(params);
+    // Generate RSA keypair (4096-bit)
+    generateRSAKeyPair(st.rng, st.priv, st.pub);
+    
+    // Generate ECDH keypair (P-521 curve)
+    generateECDHKeyPair(st.rng, st.ecdhDomain, st.ecdhPrivKey, st.ecdhPubKey);
+    
     loadOrCreatePeerId(st.localPeerId);
+    
+    // Send RSA public key
     std::vector<uint8_t> mypub = serializePublicKey(st.pub);
     if (!writeFrame(s, MsgType::PublicKey, mypub)) {
         st.addLog(std::string(label) + " send PublicKey failed");
         return false;
     }
+    
+    // Receive peer's RSA public key
     MsgType t;
     std::vector<uint8_t> payload;
     if (!readFrame(s, t, payload) || t != MsgType::PublicKey) {
@@ -49,6 +75,24 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
         st.addLog(std::string(label) + " bad PublicKey");
         return false;
     }
+    
+    // Send ECDH public key
+    std::vector<uint8_t> myEcdhPub = serializeECDHPublicKey(st.ecdhPubKey);
+    if (!writeFrame(s, MsgType::ECDHPublicKey, myEcdhPub)) {
+        st.addLog(std::string(label) + " send ECDHPublicKey failed");
+        return false;
+    }
+    
+    // Receive peer's ECDH public key
+    if (!readFrame(s, t, payload) || t != MsgType::ECDHPublicKey) {
+        st.addLog(std::string(label) + " expected ECDHPublicKey");
+        return false;
+    }
+    if (!loadECDHPublicKey(payload.data(), payload.size(), st.peerEcdhPubKey)) {
+        st.addLog(std::string(label) + " bad ECDHPublicKey");
+        return false;
+    }
+    
     std::vector<uint8_t> remoteId;
     uint8_t remoteRole = 1;
     if (!sendPeerHello(s, st.localPeerId, 0) || !recvPeerHello(s, remoteId, remoteRole)) {
@@ -74,49 +118,41 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
                 st.addLog("Re-key complete");
             }
             st.sessionReady = true;
-            st.addLog("Session ready");
+            st.addLog("Session ready (Hybrid RSA-4096 + ECDH-P521 encryption)");
             st.nextRekey = std::chrono::steady_clock::now() + std::chrono::seconds(60);
             st.sessionChosen.store(true);
             return;
         }
         if (mt == MsgType::Data) {
-            if (!st.sessionReady) {
-                st.addLog("Data before session ready");
-                return;
-            }
-            uint64_t ctr, ts;
-            std::string msg, err;
-            if (!parseDataPayload(st.sessionKey, data, ctr, ts, msg, st.useHmac, err)) {
-                st.addLog(std::string("Recv error: ") + err);
-                return;
-            }
-            if (ctr <= st.lastRecvCounter) {
-                st.addLog("Duplicate/out-of-order");
-                return;
-            }
-            st.lastRecvCounter = ctr;
-            st.addLog(fmtTime(ts) + std::string(" Peer: ") + msg);
+            handleDataMessage(st, data, label);
             return;
         }
         });
     st.session->onClosed([&] { FullDisconnect(st, "peer closed"); });
     st.session->onError([&] { FullDisconnect(st, "session error"); });
     st.session->start();
-    st.sessionKey.CleanNew(32);
-    st.rng.GenerateBlock(st.sessionKey, st.sessionKey.size());
-    std::vector<uint8_t> wrapped = rsaWrapAesKey(st.peerPub, st.sessionKey);
+    
+    // Derive hybrid session key using both RSA and ECDH
+    std::vector<uint8_t> rsaWrapped;
+    if (!deriveHybridSessionKey(st.rng, st.peerPub, st.peerEcdhPubKey, 
+                                 st.ecdhPrivKey, st.ecdhDomain, st.sessionKey, rsaWrapped)) {
+        st.addLog(std::string(label) + " hybrid key derivation failed");
+        FullDisconnect(st, "key derivation fail");
+        return false;
+    }
+    
     std::vector<uint8_t> skPayload;
-    uint16_t klen = (uint16_t)wrapped.size();
-    st.addLog(std::string(label) + " preparing SessionKey frame (" + std::to_string(klen) + " bytes wrapped)");
+    uint16_t klen = (uint16_t)rsaWrapped.size();
+    st.addLog(std::string(label) + " preparing Hybrid SessionKey frame (" + std::to_string(klen) + " bytes)");
     skPayload.push_back((uint8_t)((klen >> 8) & 0xFF));
     skPayload.push_back((uint8_t)(klen & 0xFF));
-    skPayload.insert(skPayload.end(), wrapped.begin(), wrapped.end());
+    skPayload.insert(skPayload.end(), rsaWrapped.begin(), rsaWrapped.end());
     if (!st.session->sendFrame(MsgType::SessionKey, skPayload)) {
         st.addLog(std::string(label) + " SessionKey send failed");
         FullDisconnect(st, "sessionkey send fail");
         return false;
     }
-    st.addLog(std::string(label) + " SessionKey sent, waiting for SessionOk");
+    st.addLog(std::string(label) + " Hybrid SessionKey sent, waiting for SessionOk");
     return true;
 }
 
@@ -304,17 +340,22 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
         set_nodelay(s);
         st.addLog(std::string("[listen] accepted tuple ") + sock_tuple_str(s));
 
-        CryptoPP::InvertibleRSAFunction params;
-        params.GenerateRandomWithKeySize(st.rng, 3072);
-        st.priv = CryptoPP::RSA::PrivateKey(params);
-        st.pub = CryptoPP::RSA::PublicKey(params);
+        // Generate RSA keypair (4096-bit)
+        generateRSAKeyPair(st.rng, st.priv, st.pub);
+        
+        // Generate ECDH keypair (P-521 curve)
+        generateECDHKeyPair(st.rng, st.ecdhDomain, st.ecdhPrivKey, st.ecdhPubKey);
+        
         loadOrCreatePeerId(st.localPeerId);
+        
+        // Send RSA public key
         std::vector<uint8_t> hostPubSer = serializePublicKey(st.pub);
         if (!writeFrame(s, MsgType::PublicKey, hostPubSer)) {
             closesocket(s);
             continue;
         }
 
+        // Receive peer's RSA public key
         MsgType t;
         std::vector<uint8_t> pl;
         if (!readFrame(s, t, pl) || t != MsgType::PublicKey) {
@@ -322,6 +363,23 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
             continue;
         }
         if (!loadPublicKey(pl.data(), pl.size(), st.peerPub)) {
+            closesocket(s);
+            continue;
+        }
+        
+        // Send ECDH public key
+        std::vector<uint8_t> myEcdhPub = serializeECDHPublicKey(st.ecdhPubKey);
+        if (!writeFrame(s, MsgType::ECDHPublicKey, myEcdhPub)) {
+            closesocket(s);
+            continue;
+        }
+        
+        // Receive peer's ECDH public key
+        if (!readFrame(s, t, pl) || t != MsgType::ECDHPublicKey) {
+            closesocket(s);
+            continue;
+        }
+        if (!loadECDHPublicKey(pl.data(), pl.size(), st.peerEcdhPubKey)) {
             closesocket(s);
             continue;
         }
@@ -351,43 +409,24 @@ static inline void ListenAndAccept(AppState& st, uint16_t port) {
                     return;
                 }
                 const uint8_t* rkptr = data.data() + 2;
-                CryptoPP::SecByteBlock key;
-                try {
-                    CryptoPP::AutoSeededRandomPool rng;
-                    CryptoPP::RSAES_OAEP_SHA_Decryptor dec(st.priv);
-                    std::string unwrapped;
-                    CryptoPP::StringSource ss(rkptr, rklen, true,
-                        new CryptoPP::PK_DecryptorFilter(rng, dec, new CryptoPP::StringSink(unwrapped)));
-                    key.Assign(reinterpret_cast<const CryptoPP::byte*>(unwrapped.data()), unwrapped.size());
-                } catch (...) {
-                    st.addLog("[listen] RSA unwrap fail");
+                
+                // Unwrap hybrid session key using both RSA and ECDH
+                if (!unwrapHybridSessionKey(st.priv, rkptr, rklen,
+                                           st.ecdhPrivKey, st.peerEcdhPubKey,
+                                           st.ecdhDomain, st.sessionKey)) {
+                    st.addLog("[listen] Hybrid key unwrap fail");
                     return;
                 }
-                st.sessionKey.Assign(key.data(), key.size());
+                
                 st.session->sendFrame(MsgType::SessionOk, {});
                 st.sessionReady = true;
-                st.addLog("[listen] Session ready");
+                st.addLog("[listen] Session ready (Hybrid RSA-4096 + ECDH-P521 encryption)");
                 st.nextRekey = std::chrono::steady_clock::now() + std::chrono::seconds(60);
                 st.sessionChosen.store(true);
                 return;
             }
             if (mt == MsgType::Data) {
-                if (!st.sessionReady) {
-                    st.addLog("[listen] data before ready");
-                    return;
-                }
-                uint64_t ctr, ts;
-                std::string msg, err;
-                if (!parseDataPayload(st.sessionKey, data, ctr, ts, msg, st.useHmac, err)) {
-                    st.addLog(std::string("[listen] recv error: ") + err);
-                    return;
-                }
-                if (ctr <= st.lastRecvCounter) {
-                    st.addLog("[listen] duplicate/out-of-order");
-                    return;
-                }
-                st.lastRecvCounter = ctr;
-                st.addLog(fmtTime(ts) + std::string(" Peer: ") + msg);
+                handleDataMessage(st, data, "[listen]");
                 return;
             }
             });
