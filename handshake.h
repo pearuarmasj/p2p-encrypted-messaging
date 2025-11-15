@@ -125,6 +125,25 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
         return false;
     }
     
+    // Create NetSession and set up message handlers BEFORE sending any frames
+    st.session = new NetSession(st.sock);
+    st.session->onMessage([&st, label](MsgType mt, const std::vector<uint8_t>& data) {
+        if (mt == MsgType::SessionOk) {
+            st.sessionReady = true;
+            st.addLog(std::string(label) + " Session ready (Hybrid RSA-4096 + ECDH-P521 encryption)");
+            st.nextRekey = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            st.sessionChosen.store(true);
+            return;
+        }
+        if (mt == MsgType::Data) {
+            handleDataMessage(st, data, label);
+            return;
+        }
+    });
+    st.session->onClosed([&st, label] { FullDisconnect(st, (std::string(label) + " peer closed").c_str()); });
+    st.session->onError([&st, label] { FullDisconnect(st, (std::string(label) + " session error").c_str()); });
+    st.session->start();
+    
     std::vector<uint8_t> skPayload;
     uint16_t klen = (uint16_t)rsaWrapped.size();
     st.addLog(std::string(label) + " preparing Hybrid SessionKey frame (" + std::to_string(klen) + " bytes)");
@@ -448,7 +467,13 @@ static inline void FullDisconnect(AppState& st, const char* reason) {
         NetSession* s = st.session;
         st.session = nullptr;
         s->stop();
-        delete s;
+        
+        // Defer deletion if we're being called from the session's recv thread
+        if (s->isRecvThread()) {
+            st.deferredSessionDelete.store(s, std::memory_order_release);
+        } else {
+            delete s;
+        }
     }
     if (st.sock != INVALID_SOCKET) {
         shutdown(st.sock, SD_BOTH);
