@@ -140,8 +140,14 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
             return;
         }
     });
-    st.session->onClosed([&st, label] { FullDisconnect(st, (std::string(label) + " peer closed").c_str()); });
-    st.session->onError([&st, label] { FullDisconnect(st, (std::string(label) + " session error").c_str()); });
+    st.session->onClosed([&st, label] { 
+        std::string msg = std::string(label) + " peer closed";
+        FullDisconnect(st, msg.c_str()); 
+    });
+    st.session->onError([&st, label] { 
+        std::string msg = std::string(label) + " session error";
+        FullDisconnect(st, msg.c_str()); 
+    });
     st.session->start();
     
     std::vector<uint8_t> skPayload;
