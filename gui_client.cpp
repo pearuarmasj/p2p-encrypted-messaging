@@ -34,12 +34,21 @@ using namespace std;
 static AppState g_state; static bool g_started=false; static size_t g_logIndex=0; static HWND g_hLog=nullptr, g_hInput=nullptr, g_hStatus=nullptr, g_hHost=nullptr, g_hLPort=nullptr, g_hCPort=nullptr, g_hHmac=nullptr, g_hListenOnly=nullptr, g_hConnectOnly=nullptr, g_hAutoMap=nullptr;
 
 static void RefreshUi(){
+    // reclaim deferred NetSession safely
+    if (NetSession* ds = g_state.deferredSessionDelete.load(std::memory_order_acquire)) {
+        // Ensure its recv thread is gone (stop() already set running=false)
+        delete ds;
+        g_state.deferredSessionDelete.store(nullptr, std::memory_order_release);
+    }
     vector<string> newLines; {
         lock_guard<mutex> lk(g_state.logMutex);
         while(g_logIndex < g_state.log.size()) newLines.push_back(g_state.log[g_logIndex++]);
     }
     for(auto& l: newLines) AppendLogLine(g_hLog, l);
-    if(g_hStatus){ const char* sttxt = g_state.connected? (g_state.sessionReady? "Ready" : "Handshaking") : (g_started? "Connecting/Listening" : "Idle"); SetWindowTextA(g_hStatus, sttxt); }
+    if(g_hStatus){
+        const char* sttxt = g_state.connected? (g_state.sessionReady? "Ready" : "Handshaking") : (g_started? "Connecting/Listening" : "Idle");
+        SetWindowTextA(g_hStatus, sttxt);
+    }
 }
 
 static LRESULT CALLBACK InputEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,

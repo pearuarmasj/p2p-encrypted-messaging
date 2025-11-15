@@ -6,6 +6,7 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <atomic> // added for reentrancy guard
 
 #include "app_state.h"
 #include "crypto_utils.h"
@@ -55,13 +56,9 @@ static inline void handleDataMessage(AppState& st, const std::vector<uint8_t>& d
 static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label) {
     // Generate RSA keypair (4096-bit)
     generateRSAKeyPair(st.rng, st.priv, st.pub);
-
-    // RSA keypair generated (logging keys removed for security)
     
     // Generate ECDH keypair (P-521 curve)
     generateECDHKeyPair(st.rng, st.ecdhDomain, st.ecdhPrivKey, st.ecdhPubKey);
-
-    // ECDH keypair generated (logging keys removed for security)
     
     loadOrCreatePeerId(st.localPeerId);
     
@@ -119,41 +116,14 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
     st.sock = s;
     st.connected = true;
     st.addLog(std::string(label) + " connected");
-    st.session = new NetSession(st.sock);
-    st.session->onMessage([&](MsgType mt, const std::vector<uint8_t>& data) {
-        if (mt == MsgType::SessionOk) {
-            if (st.pendingRekey) {
-                st.sessionKey.Assign(st.pendingKey.data(), st.pendingKey.size());
-                st.pendingRekey = false;
-                st.lastRecvCounter = 0;
-                st.sendCounter.store(0);
-                st.addLog("Re-key complete");
-            }
-            st.sessionReady = true;
-            st.addLog("Session ready (Hybrid RSA-4096 + ECDH-P521 encryption)");
-            st.nextRekey = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-            st.sessionChosen.store(true);
-            return;
-        }
-        if (mt == MsgType::Data) {
-            handleDataMessage(st, data, label);
-            return;
-        }
-        });
-    st.session->onClosed([&] { FullDisconnect(st, "peer closed"); });
-    st.session->onError([&] { FullDisconnect(st, "session error"); });
-    st.session->start();
     
     // Derive hybrid session key using both RSA and ECDH
     std::vector<uint8_t> rsaWrapped;
     if (!deriveHybridSessionKey(st.rng, st.peerPub, st.peerEcdhPubKey, 
                                  st.ecdhPrivKey, st.ecdhDomain, st.sessionKey, rsaWrapped)) {
         st.addLog(std::string(label) + " hybrid key derivation failed");
-        FullDisconnect(st, "key derivation fail");
         return false;
     }
-
-    // Session key derived (details not logged for security)
     
     std::vector<uint8_t> skPayload;
     uint16_t klen = (uint16_t)rsaWrapped.size();
@@ -467,10 +437,11 @@ static inline void FullDisconnect(AppState& st, const char* reason) {
     if (reason && *reason)
         st.addLog(std::string("[close] ") + reason);
 
-    // join worker threads (avoid Stop crash)
-    if (st.listenThread.joinable())
+    // join worker threads (avoid Stop crash) - BUT NOT FROM WITHIN THEMSELVES
+    std::thread::id currentThreadId = std::this_thread::get_id();
+    if (st.listenThread.joinable() && st.listenThread.get_id() != currentThreadId)
         st.listenThread.join();
-    if (st.connectThread.joinable())
+    if (st.connectThread.joinable() && st.connectThread.get_id() != currentThreadId)
         st.connectThread.join();
 
     if (st.session) {

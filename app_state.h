@@ -61,6 +61,7 @@ struct AppState {
     // Own the worker threads
     std::thread listenThread;
     std::thread connectThread;
+    std::atomic<NetSession*> deferredSessionDelete{ nullptr };
 
     void addLog(const std::string& s) {
         std::lock_guard<std::mutex> lk(logMutex);
