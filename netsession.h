@@ -40,15 +40,18 @@ public:
 
 private:
     void recvLoop(){
+        bool connectionClosed = false;
         while(running.load()){
             MsgType type; std::vector<uint8_t> payload;
             if(!readFrame(sock, type, payload)){
                 running.store(false);
-                if(closedCb) closedCb();
+                connectionClosed = true;
                 break;
             }
             if(messageCb) messageCb(type,payload);
         }
+        // Invoke callbacks after exiting the loop to avoid thread self-join
+        if(connectionClosed && closedCb) closedCb();
     }
 
     SOCKET sock;
