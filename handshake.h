@@ -127,25 +127,25 @@ static inline bool DoOutboundHandshake(AppState& st, SOCKET s, const char* label
     
     // Create NetSession and set up message handlers BEFORE sending any frames
     st.session = new NetSession(st.sock);
-    st.session->onMessage([&st, label](MsgType mt, const std::vector<uint8_t>& data) {
+    st.session->onMessage([&st, label = std::string(label)](MsgType mt, const std::vector<uint8_t>& data) {
         if (mt == MsgType::SessionOk) {
             st.sessionReady = true;
-            st.addLog(std::string(label) + " Session ready (Hybrid RSA-4096 + ECDH-P521 encryption)");
+            st.addLog(label + " Session ready (Hybrid RSA-4096 + ECDH-P521 encryption)");
             st.nextRekey = std::chrono::steady_clock::now() + std::chrono::seconds(60);
             st.sessionChosen.store(true);
             return;
         }
         if (mt == MsgType::Data) {
-            handleDataMessage(st, data, label);
+            handleDataMessage(st, data, label.c_str());
             return;
         }
     });
-    st.session->onClosed([&st, label] { 
-        std::string msg = std::string(label) + " peer closed";
+    st.session->onClosed([&st, label = std::string(label)] { 
+        std::string msg = label + " peer closed";
         FullDisconnect(st, msg.c_str()); 
     });
-    st.session->onError([&st, label] { 
-        std::string msg = std::string(label) + " session error";
+    st.session->onError([&st, label = std::string(label)] { 
+        std::string msg = label + " session error";
         FullDisconnect(st, msg.c_str()); 
     });
     st.session->start();
